@@ -1,5 +1,12 @@
 # Specstory CLI Changelog
 
+## v2.17.1 2026-11-17
+
+### 🐛 Bug Fixes
+
+- Sessions resumed into Cursor CLI now open with `specstory resume`. The reconstructed `store.db` did not match what `cursor-agent --resume` reads back: the session root referenced messages by blob id instead of carrying them inline, each message lacked the `<user_query>` wrapper Cursor puts around a prompt, and the session metadata omitted the `blobEncryptionKey` the CLI requires. Reconstructed sessions now use the shape the CLI writes itself, so the prior conversation loads.
+- Resuming into Cursor CLI is lossy: thinking blocks and tool calls from the source session are dropped, because an exported tool call keeps only its name, summary and formatted markdown, with no call id, input or output to rebuild the tool-call/tool-result pairs a native session needs.
+
 ## v2.17.0 2026-11-06
 
 ### 📢 Announcements

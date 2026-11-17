@@ -85,7 +85,7 @@ func FlattenSessionData(data *schema.SessionData, migrationNote string) []Turn {
 			// local-command output, etc.) so they are not replayed into the resumed
 			// session. This is intentionally reconstruction-only — archival markdown
 			// stays faithful to the source session.
-			if isSyntheticTurnText(text) {
+			if IsSyntheticTurnText(text) {
 				continue
 			}
 
@@ -192,12 +192,12 @@ var extraSyntheticTurnMarkers = []string{
 	"[Request interrupted by user",
 }
 
-// isSyntheticTurnText reports whether a flattened turn is a synthetic,
+// IsSyntheticTurnText reports whether a flattened turn is a synthetic,
 // non-conversational artifact that should not be replayed into a resumed session.
 // It matches by Contains because a flattened turn concatenates content parts, so a
 // marker can appear anywhere in the text. Markdown generation does NOT use this
 // filter and stays faithful to source.
-func isSyntheticTurnText(text string) bool {
+func IsSyntheticTurnText(text string) bool {
 	for _, marker := range SyntheticCommandTags {
 		if strings.Contains(text, marker) {
 			return true

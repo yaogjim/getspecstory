@@ -3,6 +3,7 @@ package cursorcli
 import (
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -83,6 +84,20 @@ func openStoreBytes(t *testing.T, content []byte) (map[string][]byte, map[string
 	return blobs, meta
 }
 
+// unwrapNativeMessage extracts the JSON payload from a native-framed message blob
+// (pbField(1, json)) so tests can assert on the message Cursor actually reads.
+func unwrapNativeMessage(t *testing.T, blob []byte) []byte {
+	t.Helper()
+	if len(blob) < 2 || blob[0] != 0x0a {
+		t.Fatalf("message blob is not field-1 framed: %x", blob[:min(len(blob), 8)])
+	}
+	length, n := binary.Uvarint(blob[1:])
+	if n <= 0 || int(length) != len(blob)-1-n {
+		t.Fatalf("message blob length prefix %d does not match %d bytes", length, len(blob))
+	}
+	return blob[1+n:]
+}
+
 // refsOf scans a protobuf node for 32-byte blob-id references in the given field.
 func refsOf(node []byte, fieldNum int) []string {
 	tag := byte(fieldNum<<3 | 2)
@@ -100,7 +115,16 @@ func refsOf(node []byte, fieldNum int) []string {
 // the message blobs in order with a field-2 metadata node.
 func TestReconstructSession_Structure(t *testing.T) {
 	data := reconstructSampleData()
-	expected := spi.FlattenSessionData(data, "") // user + 3 agent turns
+	// The sample's tool bubble is dropped (Cursor resume can't carry it), so only
+	// the user turn and the two plain agent text turns remain.
+	expected := []struct {
+		Role string
+		Text string
+	}{
+		{schema.RoleUser, "Create a hello world in Rust."},
+		{schema.RoleAgent, "I'll create it."},
+		{schema.RoleAgent, "Done."},
+	}
 
 	out, err := NewProvider().ReconstructSession(data, spi.ReconstructOptions{WorkspaceRoot: "/tmp/proj"})
 	if err != nil {
@@ -127,39 +151,98 @@ func TestReconstructSession_Structure(t *testing.T) {
 	if meta["agentId"] != out.SessionID {
 		t.Errorf("meta agentId %v != session id %q", meta["agentId"], out.SessionID)
 	}
-
-	// Root field 1 = message blobs in order; verify roles + text match the turns.
-	msgRefs := refsOf(root, 1)
-	if len(msgRefs) != len(expected) {
-		t.Fatalf("root references %d messages, want %d", len(msgRefs), len(expected))
+	// The CLI's meta deserializer requires a 64-hex-char blobEncryptionKey.
+	if key, _ := meta["blobEncryptionKey"].(string); len(key) != 64 || !isLowerHex(key) {
+		t.Errorf("meta blobEncryptionKey %q is not a 64-char hex key", key)
 	}
-	for i, ref := range msgRefs {
-		var m struct {
-			Role    string `json:"role"`
-			Content []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-		}
-		if err := json.Unmarshal(blobs[ref], &m); err != nil {
+
+	// Root field 1 = one inlined native message per turn, in order (never a blob
+	// reference): a referenced root is what makes resume demand unresolvable blobs.
+	entries := inlineEntries(t, root)
+	if len(entries) != len(expected) {
+		t.Fatalf("root inlines %d messages, want %d", len(entries), len(expected))
+	}
+	for i, payload := range entries {
+		// Native user messages carry content as the <user_query>-wrapped prompt string;
+		// native assistant messages carry a typed content-part array with the text.
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &m); err != nil {
 			t.Fatalf("message %d not JSON: %v", i, err)
 		}
+		// The resume importer decodes with DisallowUnknownFields: only these keys.
+		for key := range m {
+			if key != "role" && key != "content" && key != "providerOptions" {
+				t.Errorf("message %d has unexpected top-level field %q", i, key)
+			}
+		}
+		var role string
+		_ = json.Unmarshal(m["role"], &role)
 		wantRole := "assistant"
 		if expected[i].Role == schema.RoleUser {
 			wantRole = "user"
 		}
-		if m.Role != wantRole {
-			t.Errorf("message %d role = %q, want %q", i, m.Role, wantRole)
+		if role != wantRole {
+			t.Errorf("message %d role = %q, want %q", i, role, wantRole)
 		}
-		if len(m.Content) == 0 || m.Content[0].Text != expected[i].Text {
-			t.Errorf("message %d text mismatch:\n got: %q\nwant: %q", i, m.Content, expected[i].Text)
+		var got string
+		if err := json.Unmarshal(m["content"], &got); err != nil {
+			var parts []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(m["content"], &parts); err != nil {
+				t.Fatalf("message %d content shape: %v", i, err)
+			}
+			if len(parts) == 1 && parts[0].Type == "text" {
+				got = parts[0].Text
+			}
+		}
+		if wantRole == "user" {
+			if want := "<user_query>\n" + expected[i].Text + "\n</user_query>"; got != want {
+				t.Errorf("message %d text mismatch:\n got: %q\nwant: %q", i, got, want)
+			}
+		} else if got != expected[i].Text {
+			t.Errorf("message %d text mismatch:\n got: %q\nwant: %q", i, got, expected[i].Text)
 		}
 	}
+}
 
-	// Root field 2 = metadata node, which must resolve.
-	metaRefs := refsOf(root, 2)
-	if len(metaRefs) != 1 || blobs[metaRefs[0]] == nil {
-		t.Errorf("root should reference exactly one metadata node; got %v", metaRefs)
+// inlineEntries parses a ConversationStateStructure root and returns the JSON of each
+// field-1 entry, failing on any 32-byte blob reference.
+func inlineEntries(t *testing.T, root []byte) [][]byte {
+	t.Helper()
+	var entries [][]byte
+	for i := 0; i < len(root); {
+		tag := root[i]
+		length, n := binary.Uvarint(root[i+1:])
+		if n <= 0 || int(length) > len(root)-i-1-n {
+			t.Fatalf("root field at %d is malformed", i)
+		}
+		payload := root[i+1+n : i+1+n+int(length)]
+		if tag != 0x0a {
+			t.Fatalf("root field at %d has tag %#x; only inlined field-1 entries are allowed", i, tag)
+		}
+		if len(payload) == sha256.Size {
+			t.Fatalf("root entry %d is a blob reference, want inlined message", len(entries))
+		}
+		// Entries are bare JSON messages (unframed), exactly as the importer decodes them.
+		if !json.Valid(payload) {
+			t.Fatalf("root entry %d is not inline JSON: %x", len(entries), payload[:min(len(payload), 16)])
+		}
+		entries = append(entries, payload)
+		i += 1 + n + int(length)
 	}
+	return entries
+}
+
+// isLowerHex reports whether s is non-empty lowercase hex.
+func isLowerHex(s string) bool {
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return s != ""
 }
 
 func TestNativeSessionPath(t *testing.T) {
@@ -179,5 +262,59 @@ func TestReconstructSession_Empty(t *testing.T) {
 	_, err := NewProvider().ReconstructSession(&schema.SessionData{SessionID: "x", WorkspaceRoot: "/tmp"}, spi.ReconstructOptions{})
 	if err == nil {
 		t.Fatal("expected error reconstructing a session with no content")
+	}
+}
+
+// TestReconstructTurns_VisibleConversationOnly pins the lossy Cursor migration
+// policy: thinking, tool invocations, and the migration note never reach the
+// transcript, and only the visible user/assistant text survives in order.
+func TestReconstructTurns_VisibleConversationOnly(t *testing.T) {
+	md := "body"
+	data := &schema.SessionData{
+		SessionID: "s",
+		Exchanges: []schema.Exchange{{
+			Messages: []schema.Message{
+				{Role: schema.RoleUser, Content: []schema.ContentPart{{Type: schema.ContentTypeText, Text: "hi"}}},
+				{Role: schema.RoleAgent, Content: []schema.ContentPart{
+					{Type: schema.ContentTypeThinking, Text: "The user just said hi."},
+					{Type: schema.ContentTypeText, Text: "Hello!"},
+				}},
+				{Role: schema.RoleAgent, Tool: &schema.ToolInfo{Name: "read_file", FormattedMarkdown: &md}},
+				{Role: schema.RoleAgent, Content: []schema.ContentPart{{Type: schema.ContentTypeThinking, Text: "Thinking only."}}},
+				{Role: schema.RoleUser, Content: []schema.ContentPart{{Type: schema.ContentTypeText, Text: "   "}}},
+				{Role: schema.RoleUser, Content: []schema.ContentPart{{Type: schema.ContentTypeText, Text: "bye"}}},
+			},
+		}},
+	}
+
+	turns, err := reconstructTurns(data)
+	if err != nil {
+		t.Fatalf("reconstructTurns: %v", err)
+	}
+	want := []spi.Turn{
+		{Role: schema.RoleUser, Text: "hi"},
+		{Role: schema.RoleAgent, Text: "Hello!"},
+		{Role: schema.RoleUser, Text: "bye"},
+	}
+	if len(turns) != len(want) {
+		t.Fatalf("got %d turns, want %d: %+v", len(turns), len(want), turns)
+	}
+	for i := range want {
+		if turns[i] != want[i] {
+			t.Errorf("turn %d = %+v, want %+v", i, turns[i], want[i])
+		}
+	}
+
+	// Nothing visible left => a clear error, never an empty session.
+	thinkingOnly := &schema.SessionData{Exchanges: []schema.Exchange{{Messages: []schema.Message{
+		{Role: schema.RoleAgent, Content: []schema.ContentPart{{Type: schema.ContentTypeThinking, Text: "t"}}},
+		{Role: schema.RoleAgent, Tool: &schema.ToolInfo{Name: "x"}},
+	}}}}
+	if _, err := reconstructTurns(thinkingOnly); err == nil {
+		t.Fatal("expected an error when no visible conversation remains")
+	}
+
+	if _, err := reconstructTurns(nil); err == nil {
+		t.Fatal("expected an error for nil session data")
 	}
 }

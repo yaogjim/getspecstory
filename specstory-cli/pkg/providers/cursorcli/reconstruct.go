@@ -2,14 +2,17 @@ package cursorcli
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,13 +22,20 @@ import (
 )
 
 // Cursor stores a session as a SQLite store.db: a content-addressed Merkle-DAG of
-// blobs where each blob's id == sha256(data). Conversation messages are PLAIN JSON
-// blobs; small protobuf "index" nodes thread them into the DAG; `meta['0']` carries
-// the head pointer (`latestRootBlobId`). Tool calls and thinking are already
-// flattened into agent text by FlattenSessionData, so reconstruction emits only
-// user/assistant text-message blobs. The structure below (messages + root + a
-// field-2 metadata subtree of title/empty/preview nodes, with NO system message)
-// was validated against `cursor-agent --resume`. See docs/SESSION-PORTABILITY.md.
+// blobs where each blob's id == sha256(data). `meta['0']` carries the head pointer
+// (`latestRootBlobId`) to a ConversationStateStructure whose field-1 entries hold
+// the conversation's CoreMessages *inline* (one raw JSON message per entry) — the
+// shape the CLI itself writes. A root of 32-byte blob references makes the resume
+// importer treat the root as "native" and demand every referenced blob be
+// resolvable; inline entries are simply decoded as messages.
+//
+// Each message is top-level {role, content} only. A user message's content is a
+// string holding the prompt wrapped in <user_query> tags; an assistant message's
+// content is a typed content-part array. The same messages are also stored as
+// individual native-framed blobs (a field-1 protobuf frame around the JSON) for the
+// CLI's UI. Tool calls and thinking are already flattened into agent text by
+// FlattenSessionData, so reconstruction emits only user/assistant text messages.
+// See docs/SESSION-PORTABILITY.md.
 
 // blobID returns the content-addressed id Cursor uses: sha256(data), hex-encoded.
 func blobID(data []byte) string {
@@ -42,25 +52,23 @@ func pbField(fieldNum int, payload []byte) []byte {
 	return append(out, payload...)
 }
 
-// pbRef encodes a length-delimited field carrying a 32-byte blob id reference.
-func pbRef(fieldNum int, idHex string) []byte {
-	raw, _ := hex.DecodeString(idHex)
-	return pbField(fieldNum, raw)
+// pbVarint encodes a protobuf varint field (wire type 0), used for small enums.
+func pbVarint(fieldNum int, value uint64) []byte {
+	out := []byte{byte(fieldNum << 3)}
+	var buf [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(buf[:], value)
+	return append(out, buf[:n]...)
 }
 
-// cursorTextPart / message structs marshal to Cursor's plain-JSON message shape.
-type cursorTextPart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-type cursorUserMsg struct {
-	Role    string           `json:"role"`
-	Content []cursorTextPart `json:"content"`
-}
-type cursorAsstMsg struct {
-	ID      string           `json:"id"`
-	Role    string           `json:"role"`
-	Content []cursorTextPart `json:"content"`
+// Cursor's native CoreMessage roles, as accepted by agent --resume.
+const nativeRoleUser = "user"
+const nativeRoleAssistant = "assistant"
+
+// userQueryWrap turns a flattened user turn into the text user messages carry inside
+// the native blob. Cursor's own CLI wraps each prompt this way, and it is the marker
+// its transcript tooling looks for when splitting a user message into queries.
+func userQueryWrap(text string) string {
+	return "<user_query>\n" + text + "\n</user_query>"
 }
 
 // marshalCompact JSON-encodes v without HTML escaping and without a trailing newline.
@@ -74,9 +82,55 @@ func marshalCompact(v interface{}) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
+// reconstructTurns reduces SessionData to the visible conversation only: user text
+// turns and assistant plain-text turns. It deliberately does NOT reuse
+// spi.PrepareTurns/FlattenSessionData, whose cross-provider policy folds thinking
+// into agent text, flattens tool calls into prose, and prepends MigrationNote —
+// all three produce a transcript `cursor-agent --resume` will not open. The
+// migration is therefore lossy for Cursor: thinking, tool calls, and the migration
+// note are dropped. The order of what remains is preserved as-is.
+func reconstructTurns(data *schema.SessionData) ([]spi.Turn, error) {
+	if data == nil {
+		return nil, errors.New("cannot reconstruct nil session data")
+	}
+	var turns []spi.Turn
+	for i := range data.Exchanges {
+		for j := range data.Exchanges[i].Messages {
+			msg := &data.Exchanges[i].Messages[j]
+			if msg.Role != schema.RoleUser && msg.Role != schema.RoleAgent {
+				continue
+			}
+			// A tool-invocation bubble carries its tool use in Tool, outside Content;
+			// there is no structured result to pair it with, so it is dropped whole.
+			if msg.Tool != nil {
+				continue
+			}
+			var textParts []string
+			for _, part := range msg.Content {
+				if part.Type != schema.ContentTypeText || strings.TrimSpace(part.Text) == "" {
+					continue
+				}
+				textParts = append(textParts, part.Text)
+			}
+			text := strings.Join(textParts, "\n\n")
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
+			if spi.IsSyntheticTurnText(text) {
+				continue
+			}
+			turns = append(turns, spi.Turn{Role: msg.Role, Text: text})
+		}
+	}
+	if len(turns) == 0 {
+		return nil, errors.New("session has no visible conversation to reconstruct")
+	}
+	return turns, nil
+}
+
 // ReconstructSession rebuilds a Cursor CLI native store.db from the neutral SessionData.
 func (p *Provider) ReconstructSession(data *schema.SessionData, opts spi.ReconstructOptions) (*spi.ReconstructedSession, error) {
-	turns, err := spi.PrepareTurns(data, opts)
+	turns, err := reconstructTurns(data)
 	if err != nil {
 		return nil, err
 	}
@@ -94,53 +148,64 @@ func (p *Provider) ReconstructSession(data *schema.SessionData, opts spi.Reconst
 	blobs := map[string][]byte{}
 	put := func(b []byte) string { id := blobID(b); blobs[id] = b; return id }
 
-	// 1. Message blobs (plain JSON), in order. No system message.
-	var msgIDs []string
-	var lastAssistantText string
-	asstSeq := 0
+	// 1. Message blobs (native-framed JSON), in order. No system message. Each message
+	// is also kept in frame order for inlining into the root below.
+	var rootMessages [][]byte
 	for _, turn := range turns {
-		var raw []byte
-		var err error
+		var message map[string]interface{}
 		if turn.Role == schema.RoleUser {
-			raw, err = marshalCompact(cursorUserMsg{Role: "user", Content: []cursorTextPart{{Type: "text", Text: turn.Text}}})
+			message = map[string]interface{}{"content": userQueryWrap(turn.Text), "role": nativeRoleUser}
 		} else {
-			asstSeq++
-			raw, err = marshalCompact(cursorAsstMsg{ID: fmt.Sprintf("%d", asstSeq), Role: "assistant", Content: []cursorTextPart{{Type: "text", Text: turn.Text}}})
-			lastAssistantText = turn.Text
+			// Only role/content: the resume importer decodes root messages with
+			// DisallowUnknownFields and accepts nothing else at the top level.
+			message = map[string]interface{}{
+				"content": []map[string]string{{"type": "text", "text": turn.Text}},
+				"role":    nativeRoleAssistant,
+			}
 		}
+		messageJSON, err := marshalCompact(message)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode message: %w", err)
 		}
-		msgIDs = append(msgIDs, put(raw))
+		// The framed message blob is still stored for the CLI's own UI; the root
+		// inlines the same JSON unframed, which is what the importer decodes.
+		put(pbField(1, messageJSON))
+		rootMessages = append(rootMessages, messageJSON)
 	}
 
-	// 2. Field-2 metadata subtree: title leaf, empty placeholder, preview node.
-	titleID := put(append(pbField(1, []byte(name)), pbField(2, []byte(uuid.NewString()))...))
-	emptyID := put(pbField(3, nil))                                     // {f3:""}
-	previewID := put(pbField(1, pbField(1, []byte(lastAssistantText)))) // {f1:{f1:text}}
-	metaNodeID := put(concat(pbRef(1, titleID), pbRef(2, emptyID), pbRef(2, previewID)))
-
-	// 3. Root node: field 1 = ordered message refs, field 2 = metadata node.
+	// 2. Root: ConversationStateStructure. Field 1 = root_prompt_messages_json holds
+	// INLINE JSON messages (one raw CoreMessage per entry), matching sessions the CLI
+	// writes itself — not 32-byte blob references. A referenced root is classified as
+	// "native" by the resume importer, which then demands every referenced blob be
+	// resolvable; inline entries are used as ordinary messages with no blob lookup.
+	// Each message is still stored as its own native-framed blob (above) for the UI.
 	var root []byte
-	for _, mid := range msgIDs {
-		root = append(root, pbRef(1, mid)...)
+	for _, messageJSON := range rootMessages {
+		root = append(root, pbField(1, messageJSON)...)
 	}
-	root = append(root, pbRef(2, metaNodeID)...)
 	rootID := put(root)
 
-	// 4. meta['0'] head record (hex-encoded JSON).
+	// 3. meta['0'] head record (hex-encoded JSON). blobEncryptionKey is required by the
+	// CLI's metadata schema (a 64-hex-char random key); resume reads blobs through the
+	// same store without decrypting, so any fresh key is valid.
+	encKey, err := randomEncryptionKey()
+	if err != nil {
+		return nil, err
+	}
 	metaJSON, err := marshalCompact(map[string]interface{}{
-		"agentId":          newID,
-		"latestRootBlobId": rootID,
-		"name":             name,
-		"mode":             "default",
-		"createdAt":        time.Now().UTC().UnixMilli(),
+		"agentId":           newID,
+		"latestRootBlobId":  rootID,
+		"name":              name,
+		"mode":              "default",
+		"isRunEverything":   false,
+		"createdAt":         time.Now().UTC().UnixMilli(),
+		"blobEncryptionKey": encKey,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode meta: %w", err)
 	}
 
-	// 5. Materialize the SQLite store.db and return its bytes. SQLite needs a file
+	// 4. Materialize the SQLite store.db and return its bytes. SQLite needs a file
 	// handle, so we build in a temp file (created and removed within this call).
 	content, err := buildStoreDB(blobs, hex.EncodeToString(metaJSON))
 	if err != nil {
@@ -152,6 +217,16 @@ func (p *Provider) ReconstructSession(data *schema.SessionData, opts spi.Reconst
 		Filename:  filepath.Join(newID, "store.db"),
 		Content:   content,
 	}, nil
+}
+
+// randomEncryptionKey returns a fresh 32-byte key as 64 lowercase hex chars, the shape
+// the CLI's metadata schema validates blobEncryptionKey against.
+func randomEncryptionKey() (string, error) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return "", fmt.Errorf("failed to generate blob encryption key: %w", err)
+	}
+	return hex.EncodeToString(key), nil
 }
 
 // concat joins byte slices.
