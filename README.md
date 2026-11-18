@@ -1,12 +1,11 @@
-
-<img width="1649" height="158" alt="Group 6 (1)" src="https://github.com/user-attachments/assets/93f0210f-c3ce-4035-91df-ec597e00a3ce" />
+<img width="1649" height="158" alt="SpecStory" src="https://github.com/user-attachments/assets/93f0210f-c3ce-4035-91df-ec597e00a3ce" />
 
 
 # Intent is the new source code
 
-**Turn your AI development conversations into searchable, shareable knowledge.**
+**One searchable, portable history for every AI coding agent you use.**
 
-Never lose a brilliant solution, code snippet, or architectural decision again. SpecStory captures, indexes, and makes searchable every interaction you have with AI coding assistants across all your projects and tools.
+SpecStory saves your conversations with Cursor, Claude Code, Copilot, Codex, Gemini and 11 other agents as plain markdown in your repo. Then it lets you find them again, share them, and continue them in a different agent.
 
 <p align="left">
   <strong>Install SpecStory ──▶ </strong>&nbsp;
@@ -30,198 +29,248 @@ Never lose a brilliant solution, code snippet, or architectural decision again. 
   <a href="https://www.youtube.com/@specstory"><img src="https://img.shields.io/badge/YouTube-FF0000?style=flat-square&logo=youtube&logoColor=white" alt="YouTube" style="vertical-align: middle;"></a>
 </p>
 
-## How It Works
+## The problem
+
+You have more AI conversations than ever, and less of them to show for it.
+
+| What goes wrong | What it costs you |
+| --------------- | ----------------- |
+| **The window closes and the context is gone.** Every agent keeps its own private store - Cursor a multi-gigabyte database, Claude Code a folder of JSONL - and none of it lives in your repo. | You re-explain the same architecture, the same constraints, the same decisions, in the next session. |
+| **Your agents are islands.** A session started in Cursor CLI cannot be continued in Cursor IDE. Claude Code cannot pick up where Codex stopped. | The agent you want to use next is never the agent that has the context. |
+| **The good work never compounds.** The way you actually debug, review, and ship is buried in transcripts nobody reads again. | Your best workflows stay in your head, and every teammate rediscovers them from scratch. |
+
+SpecStory fixes this at the source: **the session becomes a file you own.**
+
+## How it works
+
+```mermaid
+flowchart TD
+    A["Cursor IDE · Claude Code<br/>Copilot CLI · Codex CLI<br/>Gemini CLI · Cursor Cloud<br/>VS Code Copilot · 9 more"]
+    B["specstory CLI<br/>reads each agent's<br/>own session store"]
+    C[".specstory/history/<br/>plain markdown,<br/>one file per session"]
+    D["~/.specstory/sessions.db<br/>derived index,<br/>rebuildable"]
+    E["SpecStory Cloud<br/>optional, opt-in"]
+
+    A --> B
+    B --> C
+    B --> D
+    C -.->|"specstory login · sync"| E
+    D -.->|"search · resume"| B
 ```
-AI Coding Tools              Local First                  Cloud Platform
-─────────────────           ─────────────                ─────────────────
-                                                          (Login Required)
-Cursor IDE         ┐
-Copilot IDE        │
-Claude Code CLI    │
-Copilot CLI        │
-Cursor CLI         │
-Cursor Cloud Agent │
-Codex CLI          ├──────►  .specstory/history/  ──────►  cloud.specstory.com
-Droid CLI          │          (Auto-Saved Locally)        (Search, Ask & Share)
-DeepSeek TUI       │
-Antigravity CLI    │
-Grok Build         │
-Muse Code          │
-OpenCode           │
-Pi                 │
-Qwen Code          ┘
-```
 
-## What's new in v2.17.2
+Everything local is yours: markdown you can commit, diff, grep, or hand to any tool that reads text. The index is a cache - delete it and it rebuilds. The cloud is opt-in and receives nothing until you log in.
 
-- **Cursor CLI sessions are saved in full.** Conversation text and every tool call (with its name and input) now come from the JSONL transcript Cursor writes per session, instead of the model-facing replay state in `store.db`. Sessions that used to save as a heading with nothing under it keep their content, and a session with nothing readable now fails loudly instead of saving an empty document.
-- **Moving a session between tools no longer pays for the session index.** `specstory resume <agent> --session <uuid>` finds the session by ID in its own store — a directory lookup, not a scan — and falls back to the index, then SpecStory Cloud, only when nothing local holds it.
-- **`specstory reindex` is incremental again for Cursor IDE.** Its freshness token is per session (how many bubbles it holds and when the newest was written) instead of the size and mtime of the multi-gigabyte `state.vscdb` every conversation shares.
+## Capture: no change to how you work
 
-Full details in [specstory-cli/README.md](specstory-cli/README.md#whats-new-in-v2172) and the [changelog](specstory-cli/changelog.md).
-
-### Move a session between the CLI and the IDE
-
-Any session can be continued in a different agent — including a Cursor CLI session in the Cursor IDE, and a Cursor IDE session in the Cursor CLI. Resuming into another agent first reconstructs the conversation in that agent's native format.
+| You want to | Run | What happens |
+| ----------- | --- | ------------ |
+| Start a session with auto-save | `specstory run claude` | Wraps the agent; markdown is written as you chat. |
+| Save the sessions already on disk | `specstory sync` | Renders every past session in this project as markdown. |
+| Keep saving while you work elsewhere | `specstory watch` | Watches the project and saves whatever agent is active. |
 
 ```zsh
-# Interactive: pick a session from this project, then pick the agent to continue it in
-specstory resume
-
-# Cursor CLI → Cursor IDE, fully non-interactive (session IDs come from `specstory list`)
-specstory resume cursoride --session 550e8400-e29b-41d4-a716-446655440000
-
-# Cursor IDE → Cursor CLI
-specstory resume cursor --session 550e8400-e29b-41d4-a716-446655440000
+specstory run cursor        # Cursor CLI, saved as you go
+specstory run cursoride     # opens the project in Cursor IDE and keeps saving
+specstory sync -s <uuid>    # one session, straight from its own store
+specstory list cursor       # what is on disk for an agent
 ```
 
-Run the command from the project the resumed session should belong to: one reconstructed into Cursor IDE is registered under the directory you are standing in. The conversation is carried across as turns of text, so tool calls appear as readable records rather than interactive tool blocks.
+## Keep: a history you can read, diff, and commit
 
-## Workflow
+Every session lands in your repo, named after the moment and the question:
 
-1. **Capture** - SpecStory CLI and IDE extensions save every AI interaction locally to `.specstory/history/`
-2. **Sync (Optional)** - Sync your local sessions to SpecStory Cloud for safekeeping and team sharing
-3. **Search** - Find conversations across all projects locally, or across multiple computers and team members in SpecStory Cloud
-4. **Chat (Optional)** - Ask questions across your sessions in SpecStory Cloud to revisit decisions, understand past work, and find solutions
-5. **Share** - Export and share specific solutions with your team
-6. **Resume** - Resume sessions locally between different agents, and between multiple computers and team members with SpecStory Cloud
-7. **Process** - Run [`/lore`](./lore) to mine your history into reusable, evidence-backed agent skills
-
-## Supported Development Tools
-
-SpecStory integrates seamlessly with your favorite AI coding tools, automatically saving all conversations locally to `.specstory/history/` in your project. **Everything is local-first** - your data stays on your machine unless you choose to sync to SpecStory Cloud.
-
-### Installation
-
-| Supported Agent                                                               | Agent Type | Min Version  | SpecStory Product                                                | Source Code                                                                                             | Installation                                                  |
-| ----------------------------------------------------------------------------- | ---------- | ------------ | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| [Cursor AI](https://www.cursor.com/)                                          | IDE        | v0.43.6+     | **[Cursor Extension](https://www.cursor.com/)**                  | Closed                                                                                                  | Search "SpecStory" in Extensions (Cmd/Ctrl+Shift+X) → Install |
-| [GitHub Copilot](https://github.com/features/copilot)                         | IDE        | v1.300.0+    | **[VSC Copilot Extension](https://github.com/features/copilot)** | Closed                                                                                                  | Search "SpecStory" in Extensions (Cmd/Ctrl+Shift+X) → Install |
-| [Claude Code](https://claude.ai/claude-code)                                  | CLI        | v1.0.27+     | **[SpecStory CLI](https://specstory.com/specstory-cli)**         | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/claudecode)     | `brew tap specstoryai/tap`<br/>`brew install specstory`       |
-| [Codex CLI](https://www.openai.com/codex)                                     | CLI        | v0.42.0+     | **[SpecStory CLI](https://specstory.com/specstory-cli)**         | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/codexcli)       | `brew tap specstoryai/tap`<br/>`brew install specstory`       |
-| [Copilot CLI](https://github.com/features/copilot/cli)                        | CLI        | 1.0.105+     | **[SpecStory CLI](https://specstory.com/specstory-cli)**         | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/copilotcli)     | `brew tap specstoryai/tap`<br/>`brew install specstory`       |
-| [Cursor CLI](https://cursor.com/cli)                                          | CLI        | v2025.09.18+ | **[SpecStory CLI](https://specstory.com/specstory-cli)**         | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/cursorcli)      | `brew tap specstoryai/tap`<br/>`brew install specstory`       |
-| [Cursor Cloud Agents](https://cursor.com/agents)                              | Cloud      |              | **[SpecStory CLI](https://specstory.com/specstory-cli)**         | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/cursorcloud)    | `brew tap specstoryai/tap`<br/>`brew install specstory`       |
-| [Droid CLI](https://factory.ai/product/cli)                                   | CLI        | v0.56.3+     | **[SpecStory CLI](https://specstory.com/specstory-cli)**         | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/droidcli)       | `brew tap specstoryai/tap`<br/>`brew install specstory`       |
-| [Gemini CLI](https://docs.cloud.google.com/gemini/docs/codeassist/gemini-cli) | CLI        | 0.15.1+      | **[SpecStory CLI](https://specstory.com/specstory-cli)**         | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/geminicli)      | `brew tap specstoryai/tap`<br/>`brew install specstory`       |
-| [DeepSeek TUI](https://github.com/Hmbown/DeepSeek-TUI)                        | CLI        | 0.8.39+      | **[SpecStory CLI](https://specstory.com/specstory-cli)**         | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/deepseektui)    | `brew tap specstoryai/tap`<br/>`brew install specstory`       |
-| [Antigravity CLI](https://antigravity.google/)                                | CLI        | v1.1.5+      | **[SpecStory CLI](https://specstory.com/specstory-cli)**         | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/antigravitycli) | `brew tap specstoryai/tap`<br/>`brew install specstory`       |
-| [Muse Code](https://developer.meta.com/ai/products/muse-code/)                | CLI        | 0.1.0+       | **[SpecStory CLI](https://specstory.com/specstory-cli)**         | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/musecode)       | `brew tap specstoryai/tap`<br/>`brew install specstory`       |
-| [Qwen Code](https://github.com/QwenLM/qwen-code)                              | CLI        | 0.23.4+      | **[SpecStory CLI](https://specstory.com/specstory-cli)**         | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/qwencode)       | `brew tap specstoryai/tap`<br/>`brew install specstory`       |
-| [Pi](https://pi.dev) | CLI | 0.85.1+ | **[SpecStory CLI](https://specstory.com/specstory-cli)** | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/piagent) | `brew tap specstoryai/tap`<br/>`brew install specstory` |
-| [Grok Build](https://x.ai/cli) | CLI | 1.0.34+ | **[SpecStory CLI](https://specstory.com/specstory-cli)** | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/grokbuild) | `brew tap specstoryai/tap`<br/>`brew install specstory` |
-| [OpenCode](https://opencode.ai/) | CLI | | **[SpecStory CLI](https://specstory.com/specstory-cli)** | [Open](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/providers/opencode) | `brew tap specstoryai/tap`<br/>`brew install specstory` |
-| Any [Agent Skills](https://agentskills.io)                                    | Skill      | Node 22.5+   | **[Lore](./lore)** 📜                                             | [Open](./lore)                                                                                          | `npx skills add specstoryai/getspecstory --skill lore`        |
-
-> [!TIP]
-> Don't see the agent you need listed here? The [SpecStory CLI](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli) is open source and it's easy to contribute new agent providers.
-
-> [!NOTE]
-> For Cursor users: Install from within Cursor, not from the Visual Studio Marketplace website. [Learn why](https://github.com/specstoryai/getspecstory/issues/8)
-
-### Terminal Coding Agents
-
-**One installation works with all terminal coding agents** - Claude Code, Cursor CLI, Codex, Copilot CLI, Droid, DeepSeek, Antigravity CLI, OpenCode, Qwen Code, and Pi - and with Cursor Cloud Agents, read from the Cursor API with your API key (set `CURSOR_API_KEY`, or `cursor_api_key` under `[providers]` in `~/.specstory/cli/config.toml`):
-
-```bash
-# Check which agents are installed
-specstory check
-
-# Launch your preferred agent with session auto-save
-specstory run claude       # Launch Claude Code
-specstory run cursor       # Launch Cursor CLI
-specstory run cursorcloud  # Start a Cursor Cloud Agent on this repo and save its sessions
-specstory run codex        # Launch Codex CLI
-specstory run copilot      # Launch Copilot CLI
-specstory run droid        # Launch Droid CLI
-specstory run deepseek     # Launch DeepSeek TUI
-specstory run antigravity  # Launch Antigravity CLI
-specstory run grok         # Launch Grok Build
-specstory run muse         # Launch Muse Code
-specstory run opencode     # Launch OpenCode
-specstory run qwen         # Launch Qwen Code
-specstory run pi           # Launch Pi
-specstory run              # Launch the default agent (Claude Code)
-
-# Render all prior agent coding sessions in the project as markdown
-specstory sync
+```text
+.specstory/history/2026-11-18_00-11-44Z-ship-minor-push-release.md
 ```
 
-All sessions automatically save to `.specstory/history/` in your current project.
+The file is ordinary markdown, so it works with everything you already have:
 
-> [!TIP]
-> The SpecStory CLI acts as a wrapper that enhances any of these terminal agents with automatic session saving. You only need the respective agent installed (e.g., Claude Code) for SpecStory to work with it.
+```markdown
+# 2026-11-18 00:11:44Z
 
-Learn much more about the [SpecStory CLI](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli).
+_**User (2026-11-18 00:11:44Z)**_
 
-## SpecStory Cloud ☁️
+Ship the minor release and push it.
 
-[**SpecStory Cloud**](https://cloud.specstory.com) transforms your local AI conversations into a powerful, centralized knowledge system.
+---
 
-### The Problem We Solve
-- **Lost Context**: Critical decisions and solutions scattered across machines and projects
-- **No Global Search**: Finding that perfect solution from last month is impossible
-- **Fragile Sharing**: Passing around Markdown files doesn't scale
+_**Agent (claude-opus-5 2026-11-18 00:11:52Z)**_
 
-### The Solution
-SpecStory Cloud creates your personal AI coding knowledge base:
-- 🎯 **Explicit Opt-In**: Nothing syncs to SpecStory Cloud without an optional sign-up and login first
-- 🔍 **Search Everywhere**: Full-text search across all your projects from all your computers.
-- 💬 **Chat with Your History**: Ask questions across your sessions to revisit decisions, understand past work, and find solutions.
-- 📚 **Organized by Project**: Automatic categorization by repository and time
-- 🚀 **API Access**: Programmatic sync and search for automation
-- 👥 **Team Features**: Share knowledge across your organization with SpecStory Cloud for Teams
+Pushing the tag now.
+```
 
-[Get Started with SpecStory Cloud →](https://cloud.specstory.com)
+- **Commit it, or don't.** Each project decides; nothing is sent anywhere without you.
+- **Secrets are redacted by default.** API keys, tokens and private keys are stripped before markdown is written or synced.
+- **Search it with anything.** `rg`, `git log -S`, your editor, your own scripts.
 
-### How to Sync to Cloud
+## Reuse: search it, move it, forge it
 
-| Method               | One-Time Setup                                               | Live Sessions                                          | Past Sessions                                        |
-|----------------------|--------------------------------------------------------------|--------------------------------------------------------|------------------------------------------------------|
-| **SpecStory CLI**    | `specstory login`                                            | Auto-pushed when using `specstory run` while logged in | Use `specstory sync` to push existing local sessions |
-| **Cursor Extension** | Command Palette → "SpecStory: Open Cloud Sync Configuration" | Configure auto-sync in settings                        | Use sync command from Command Palette                |
-| **VSCode Extension** | Command Palette → "SpecStory: Open Cloud Sync Configuration" | Configure auto-sync in settings                        | Use sync command from Command Palette                |
+### Find any past conversation
 
-> [!IMPORTANT]
-> **Local-First & Private by Default**: All sessions are saved locally to `.specstory/history/`. Nothing is ever sent to the cloud unless you explicitly login with. Even after logging in, you can control what gets synced.
+```zsh
+specstory search docker cache     # full-text across every indexed session
+specstory search                  # interactive picker; r resumes, space previews
+```
 
-## Lore 📜
+### Continue it in a different agent
 
-[**Lore**](./lore) turns the sessions SpecStory saves into agent skills forged from how you actually work. Your sessions are your lore.
+This is where your history starts paying you back. Any session can be reconstructed in another agent's native format - Cursor CLI into Cursor IDE, Cursor IDE into the Cursor CLI, anything into anything installed.
 
-### The Problem We Solve
-- **Repeated Yourself Again**: You re-explain the same workflows, conventions, and fixes to your agent every session
-- **Skills From Guesswork**: Hand-written agent skills describe how you think you work, not how you demonstrably do
+```mermaid
+sequenceDiagram
+    autonumber
+    actor You
+    participant CLI as specstory CLI
+    participant Store as Source store<br/>(agent or cloud)
+    participant Target as Target agent<br/>(e.g. Cursor IDE)
 
-### The Solution
-Lore mines your `.specstory/history` into evidence - what you actually ran, what worked, and the judgment you apply without noticing - and forges the skills you approve into every agent on your machine.
+    You->>CLI: specstory resume cursoride --session UUID
+    CLI->>Store: look up that one ID
+    Note over CLI,Store: a directory lookup, not an index of every session
+    Store-->>CLI: native transcript
+    CLI->>CLI: reconstruct in the target agent's format
+    CLI->>Target: write the conversation
+    Target-->>You: pick up where you left off
+```
 
-Install:
+```zsh
+specstory resume                                    # pick a session, pick an agent
+specstory resume cursoride --session <uuid>         # Cursor CLI → Cursor IDE
+specstory resume cursor --session <uuid>            # Cursor IDE → Cursor CLI
+specstory resume --session <cloud permalink>        # from another machine, via SpecStory Cloud
+```
 
-```sh
+| From | To | How |
+| ---- | -- | --- |
+| Any local session | Any installed agent | `specstory resume <agent> --session <uuid>` |
+| This machine | Another machine | Sync, then resume the cloud permalink there |
+| SpecStory Cloud | Local agent | `specstory resume --session specstory://…` (login + Pro) |
+
+Three things worth knowing:
+
+- **Session IDs come from `specstory list`**, or from the Resume button in SpecStory Cloud.
+- **No index is required.** The session is looked up by ID in its own provider's store, so this works on a machine that has never built an index. Browsing and searching are the only things that need one.
+- **Run it from the project the session should belong to.** A session resumed into Cursor IDE is registered under the directory you are standing in.
+
+The conversation crosses as turns of text. Tool calls appear as readable records (`Tool use: **Shell** …`) rather than interactive tool blocks.
+
+### Forge skills from your own history
+
+[**Lore**](./lore) mines your `.specstory/history` for the workflows you actually repeat, proves them with evidence and outcomes, and forges the ones you approve into skills installed across every agent on your machine.
+
+```zsh
 npx skills add specstoryai/getspecstory --skill lore
 ```
 
-Then invoke it - `/lore` in Claude Code, `$lore` in Codex, or just ask ("mine my lore") in Gemini CLI and others:
+Then invoke it - `/lore` in Claude Code, `$lore` in Codex, or just ask in Gemini CLI and others. SpecStory Cloud can also mine synced sessions into skills you browse and install with `specstory skills` (login + Pro).
 
+## Install
+
+macOS and Linux:
+
+```zsh
+curl -fsSL https://raw.githubusercontent.com/yaogjim/getspecstory/dev/install.sh | bash
 ```
-/lore
+
+Windows: download the archive from [Releases](https://github.com/yaogjim/getspecstory/releases/latest).
+
+From source:
+
+```zsh
+git clone https://github.com/yaogjim/getspecstory
+cd getspecstory/specstory-cli && go build -o specstory
 ```
 
-[Get Started with Lore →](./lore)
+> [!NOTE]
+> `brew tap specstoryai/tap && brew install specstory` installs the upstream SpecStory build. Releases in this repository can be ahead of it - v2.17.2 here carries the Cursor CLI transcript and direct-resume fixes.
 
-## Documentation & Support
+## Quick start
 
-- 📚 **[Full Documentation](https://docs.specstory.com/overview)** - Complete guides and [Cloud API reference](https://docs.specstory.com/api-reference/introduction)
-- 📜 **[Lore](./lore)** - Forge your `.specstory/history` into installable agent skills, with evidence and outcomes
-- 🐛 **[Report Issues](https://github.com/specstoryai/getspecstory/issues)** - We actively monitor and respond
-- 📖 **[Contribute to Docs](https://github.com/specstoryai/docs/)** - PRs welcome!
+```zsh
+specstory check                  # which agents are installed, and what SpecStory can read
+specstory run claude             # launch an agent with auto-save
+specstory sync                   # turn this project's past sessions into markdown
+specstory search docker cache    # find a past session by its content
+specstory resume                 # continue one, in this or another agent
+specstory login                  # optional: back up and search across machines
+```
 
-## Reviews & Feedback
+All sessions save to `.specstory/history/` in the current project.
+
+## Supported agents
+
+| Agent | Type | SpecStory reads |
+| ----- | ---- | --------------- |
+| [Cursor IDE](https://cursor.com/) | IDE | `Cursor/User/globalStorage/state.vscdb` |
+| [Cursor CLI](https://cursor.com/cli) | CLI | `~/.cursor/chats/` plus the per-session JSONL transcript |
+| [Cursor Cloud Agents](https://cursor.com/agents) | Cloud | Cursor API (`CURSOR_API_KEY`) |
+| [Claude Code](https://claude.ai/claude-code) | CLI | `~/.claude/projects/` |
+| [GitHub Copilot in VS Code](https://github.com/features/copilot) | IDE | `Code/User/workspaceStorage/*/chatSessions/` |
+| [Copilot CLI](https://github.com/features/copilot/cli) | CLI | `~/.copilot/session-state/` |
+| [Codex CLI](https://www.openai.com/codex) | CLI | `~/.codex/sessions/` |
+| [Gemini CLI](https://docs.cloud.google.com/gemini/docs/codeassist/gemini-cli) | CLI | `~/.gemini/tmp/` |
+| [Droid CLI](https://factory.ai/product/cli) | CLI | `~/.factory/sessions/` |
+| [DeepSeek TUI](https://github.com/Hmbown/DeepSeek-TUI) | CLI | `~/.deepseek/sessions/` |
+| [Antigravity CLI](https://antigravity.google/) | CLI | `~/.gemini/antigravity-cli/` |
+| [Grok Build](https://x.ai/cli) | CLI | `~/.grok/sessions/` |
+| [Muse Code](https://developer.meta.com/ai/products/muse-code/) | CLI | `~/.local/share/muse/sessions/` |
+| [OpenCode](https://opencode.ai/) | CLI | `~/.local/share/opencode/` |
+| [Pi](https://pi.dev) | CLI | `~/.pi/agent/sessions/` |
+| [Qwen Code](https://github.com/QwenLM/qwen-code) | CLI | `~/.qwen/projects/` |
+| Any [Agent Skills](https://agentskills.io) harness | Skill | via [Lore](./lore) |
+
+Cursor and VS Code users can also install the SpecStory extension from inside the editor; the CLI reads the same session stores.
+
+> [!TIP]
+> Don't see your agent? Every provider is one package behind the [Agent SPI](https://github.com/specstoryai/getspecstory/tree/dev/specstory-cli/pkg/spi) - adding one is a pull request under [`pkg/providers/`](./specstory-cli/pkg/providers).
+
+## SpecStory Cloud
+
+Local-first by default: nothing is sent anywhere unless you explicitly log in.
+
+- **Search everywhere** - full-text search across all projects on all your computers.
+- **Chat with your history** - ask questions across sessions to revisit decisions.
+- **Resume across machines** - pick up a conversation started on another laptop or by a teammate.
+- **Organized by project** - automatic categorization by repository and time.
+- **Team sharing** - share knowledge with SpecStory Cloud for Teams.
+
+```zsh
+specstory login
+specstory sync     # push existing sessions
+```
+
+With `specstory run` while logged in, live sessions are pushed automatically.
+
+[Get Started with SpecStory Cloud →](https://cloud.specstory.com)
+
+## Documentation & support
+
+- 📚 **[Full Documentation](https://docs.specstory.com/overview)** - guides and the [Cloud API reference](https://docs.specstory.com/api-reference/introduction)
+- 💻 **[SpecStory CLI README](./specstory-cli/README.md)** - every command, flag and provider detail
+- 📜 **[Lore](./lore)** - forge your history into installable agent skills, with evidence and outcomes
+- 🐛 **[Report Issues](https://github.com/specstoryai/getspecstory/issues)** - we actively monitor and respond
+- 📖 **[Contribute to Docs](https://github.com/specstoryai/docs/)** - PRs welcome
+
+<details>
+<summary><strong>What's new in v2.17.2</strong></summary>
+
+- **Cursor CLI sessions are saved in full.** Conversation text and every tool call (with its name and input) now come from the JSONL transcript Cursor writes per session, instead of the model-facing replay state in `store.db`. Sessions that used to save as a heading with nothing under it keep their content, and a session with nothing readable now fails loudly instead of saving an empty document.
+- **Moving a session between tools no longer pays for the session index.** `specstory resume <agent> --session <uuid>` finds the session by ID in its own store - a directory lookup, not a scan - and falls back to the index, then SpecStory Cloud, only when nothing local holds it.
+- **`specstory reindex` is incremental again for Cursor IDE.** Its freshness token is per session (how many bubbles it holds and when the newest was written) instead of the size and mtime of the multi-gigabyte `state.vscdb` every conversation shares.
+
+Full details in [specstory-cli/README.md](./specstory-cli/README.md#whats-new-in-v2172) and the [changelog](./specstory-cli/changelog.md).
+
+</details>
+
+## Contributing
+
+The CLI is open source under Apache 2.0. Providers, fixes and docs are all welcome - start with [CONTRIBUTING.md](./CONTRIBUTING.md) and the [CLI README](./specstory-cli/README.md).
+
+## Reviews & feedback
 
 Love SpecStory? Help others discover their AI coding memory upgrade by leaving a [review](https://marketplace.visualstudio.com/items?itemName=SpecStory.specstory-vscode&ssr=false#review-details)! 🧠
 
-## Star History
+## Star history
 
 ![Star History Chart](https://api.star-history.com/svg?repos=specstoryai/getspecstory&type=Date)
 
