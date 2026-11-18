@@ -25,8 +25,12 @@ esac
 
 echo "🚀 Installing SpecStory CLI for $OS $ARCH..."
 
-# Get latest version
-VERSION=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+# Get latest version. Read it from the releases/latest redirect rather than the
+# GitHub API: the unauthenticated API is limited to 60 requests/hour per IP,
+# which makes installs fail on shared or busy networks.
+VERSION=$(curl -sI "https://github.com/$REPO/releases/latest" \
+    | tr -d '\r' \
+    | sed -nE 's#^[Ll]ocation: .*/releases/tag/([^/[:space:]]+)$#\1#p')
 
 if [ -z "$VERSION" ]; then
     echo "❌ Failed to get latest version"
