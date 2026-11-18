@@ -52,6 +52,31 @@ Pi                 │
 Qwen Code          ┘
 ```
 
+## What's new in v2.17.2
+
+- **Cursor CLI sessions are saved in full.** Conversation text and every tool call (with its name and input) now come from the JSONL transcript Cursor writes per session, instead of the model-facing replay state in `store.db`. Sessions that used to save as a heading with nothing under it keep their content, and a session with nothing readable now fails loudly instead of saving an empty document.
+- **Moving a session between tools no longer pays for the session index.** `specstory resume <agent> --session <uuid>` finds the session by ID in its own store — a directory lookup, not a scan — and falls back to the index, then SpecStory Cloud, only when nothing local holds it.
+- **`specstory reindex` is incremental again for Cursor IDE.** Its freshness token is per session (how many bubbles it holds and when the newest was written) instead of the size and mtime of the multi-gigabyte `state.vscdb` every conversation shares.
+
+Full details in [specstory-cli/README.md](specstory-cli/README.md#whats-new-in-v2172) and the [changelog](specstory-cli/changelog.md).
+
+### Move a session between the CLI and the IDE
+
+Any session can be continued in a different agent — including a Cursor CLI session in the Cursor IDE, and a Cursor IDE session in the Cursor CLI. Resuming into another agent first reconstructs the conversation in that agent's native format.
+
+```zsh
+# Interactive: pick a session from this project, then pick the agent to continue it in
+specstory resume
+
+# Cursor CLI → Cursor IDE, fully non-interactive (session IDs come from `specstory list`)
+specstory resume cursoride --session 550e8400-e29b-41d4-a716-446655440000
+
+# Cursor IDE → Cursor CLI
+specstory resume cursor --session 550e8400-e29b-41d4-a716-446655440000
+```
+
+Run the command from the project the resumed session should belong to: one reconstructed into Cursor IDE is registered under the directory you are standing in. The conversation is carried across as turns of text, so tool calls appear as readable records rather than interactive tool blocks.
+
 ## Workflow
 
 1. **Capture** - SpecStory CLI and IDE extensions save every AI interaction locally to `.specstory/history/`

@@ -10,6 +10,14 @@ SpecStory CLI is a cross-platform command-line tool for saving AI coding convers
 
 It saves your AI coding conversations as local markdown files of each session. It can optionally sync your markdown files to the [SpecStory Cloud](https://cloud.specstory.com), turning your AI chat history into a centralized knowledge system that you can chat with and search.
 
+## What's new in v2.17.2
+
+- **Cursor CLI conversations are saved in full.** SpecStory used to rebuild a Cursor CLI session from the blob DAG in `store.db`, which holds Cursor's model-facing replay state rather than the conversation: prose could come out empty on tool-only turns and tool calls were not represented at all, so a session could be saved as a heading with nothing under it. It now reads the JSONL transcript Cursor writes per session (`~/.cursor/projects/<slug>/agent-transcripts/`), with `store.db` kept as a fallback, so the saved markdown carries every turn and each tool call with its name and input. A session with no readable conversation fails with an error instead of being saved as an empty document.
+- **Resuming a known session no longer pays for the index.** `specstory resume <agent> --session <uuid>` now finds the session in its provider's own store — a directory lookup, not a scan — and falls back to the sessions index, then SpecStory Cloud, only when nothing local holds it. Syncing, importing and exporting a session whose ID you already have no longer depends on an index of every session on the machine. Cursor CLI and Cursor IDE gained the by-id lookup this needs, and Cursor CLI sessions can be read straight from their `store.db` path, since Cursor keys them by a one-way hash of the project directory.
+- **`reindex` is incremental again for Cursor IDE.** Every Cursor IDE conversation lives in one multi-gigabyte `state.vscdb`, and their freshness token was that file's size and modification time, so any write anywhere in Cursor marked every session as changed and re-parsed it. The token now comes from the session itself — how many bubbles it holds and when the newest one was written — which advances when a turn is added and stays put otherwise. The first reindex after upgrading re-reads each session once, because the stored tokens are in the old form.
+
+The full history is in [changelog.md](changelog.md).
+
 ## Features
 
 - Cross-platform support (macOS, Linux including WSL, and native Windows)
@@ -24,24 +32,24 @@ It saves your AI coding conversations as local markdown files of each session. I
 
 The following coding agents are supported in the SpecStory CLI:
 
-| Agent                                                          | Provider                                        | Data Format | Source Location                 |
-| -------------------------------------------------------------- | ----------------------------------------------- | ----------- | ------------------------------- |
-| [Claude Code](https://www.claude.com/product/claude-code)      | [claudecode](pkg/providers/claudecode/)         | JSONL       | `~/.claude/projects/`           |
-| [Codex CLI](https://www.openai.com/codex/cli/)                 | [codexcli](pkg/providers/codexcli/)             | JSONL       | `~/.codex/sessions/`            |
-| [Copilot CLI](https://github.com/features/copilot/cli)         | [copilotcli](pkg/providers/copilotcli/)         | JSONL       | `~/.copilot/session-state/`     |
-| [Cursor CLI](https://cursor.com/cli)                           | [cursorcli](pkg/providers/cursorcli/)           | SQLite      | `~/.cursor/chats/`              |
-| [Cursor IDE](https://cursor.com/)                              | [cursoride](pkg/providers/cursoride/)           | SQLite      | `Cursor/User/globalStorage/`    |
-| [Cursor Cloud Agent](https://cursor.com/agents)                | [cursorcloud](pkg/providers/cursorcloud/)       | HTTP API    | `api.cursor.com`                |
-| [VS Code Copilot](https://code.visualstudio.com/)              | [copilotide](pkg/providers/copilotide/)         | JSON/JSONL  | `Code/User/workspaceStorage/`   |
-| [Droid CLI](https://factory.ai/product/cli)                    | [droidcli](pkg/providers/droidcli/)             | JSONL       | `~/.factory/sessions/`          |
-| [Gemini CLI](https://ai.google.dev/gemini-cli)                 | [geminicli](pkg/providers/geminicli/)           | JSON        | `~/.gemini/tmp/`                |
-| [DeepSeek TUI](https://github.com/Hmbown/DeepSeek-TUI)         | [deepseektui](pkg/providers/deepseektui/)       | JSON        | `~/.deepseek/sessions/`         |
-| [Antigravity CLI](https://antigravity.google/)                 | [antigravitycli](pkg/providers/antigravitycli/) | JSONL       | `~/.gemini/antigravity-cli/`    |
-| [Muse Code](https://developer.meta.com/ai/products/muse-code/) | [musecode](pkg/providers/musecode/)             | JSONL       | `~/.local/share/muse/sessions/` |
-| [OpenCode](https://opencode.ai/)                               | [opencode](pkg/providers/opencode/)             | SQLite      | `~/.local/share/opencode/`      |
-| [Pi](https://pi.dev)                                           | [piagent](pkg/providers/piagent/)               | JSONL       | `~/.pi/agent/sessions/`         |
-| [Qwen Code](https://github.com/QwenLM/qwen-code)               | [qwencode](pkg/providers/qwencode/)             | JSONL       | `~/.qwen/projects/`             |
-| [Grok Build](https://x.ai/cli)                                 | [grokbuild](pkg/providers/grokbuild/)           | JSONL       | `~/.grok/sessions/`             |
+| Agent                                                          | Provider                                        | Data Format    | Source Location                           |
+| -------------------------------------------------------------- | ----------------------------------------------- | -------------- | ----------------------------------------- |
+| [Claude Code](https://www.claude.com/product/claude-code)      | [claudecode](pkg/providers/claudecode/)         | JSONL          | `~/.claude/projects/`                     |
+| [Codex CLI](https://www.openai.com/codex/cli/)                 | [codexcli](pkg/providers/codexcli/)             | JSONL          | `~/.codex/sessions/`                      |
+| [Copilot CLI](https://github.com/features/copilot/cli)         | [copilotcli](pkg/providers/copilotcli/)         | JSONL          | `~/.copilot/session-state/`               |
+| [Cursor CLI](https://cursor.com/cli)                           | [cursorcli](pkg/providers/cursorcli/)           | SQLite + JSONL | `~/.cursor/chats/`, `~/.cursor/projects/` |
+| [Cursor IDE](https://cursor.com/)                              | [cursoride](pkg/providers/cursoride/)           | SQLite         | `Cursor/User/globalStorage/`              |
+| [Cursor Cloud Agent](https://cursor.com/agents)                | [cursorcloud](pkg/providers/cursorcloud/)       | HTTP API       | `api.cursor.com`                          |
+| [VS Code Copilot](https://code.visualstudio.com/)              | [copilotide](pkg/providers/copilotide/)         | JSON/JSONL     | `Code/User/workspaceStorage/`             |
+| [Droid CLI](https://factory.ai/product/cli)                    | [droidcli](pkg/providers/droidcli/)             | JSONL          | `~/.factory/sessions/`                    |
+| [Gemini CLI](https://ai.google.dev/gemini-cli)                 | [geminicli](pkg/providers/geminicli/)           | JSON           | `~/.gemini/tmp/`                          |
+| [DeepSeek TUI](https://github.com/Hmbown/DeepSeek-TUI)         | [deepseektui](pkg/providers/deepseektui/)       | JSON           | `~/.deepseek/sessions/`                   |
+| [Antigravity CLI](https://antigravity.google/)                 | [antigravitycli](pkg/providers/antigravitycli/) | JSONL          | `~/.gemini/antigravity-cli/`              |
+| [Muse Code](https://developer.meta.com/ai/products/muse-code/) | [musecode](pkg/providers/musecode/)             | JSONL          | `~/.local/share/muse/sessions/`           |
+| [OpenCode](https://opencode.ai/)                               | [opencode](pkg/providers/opencode/)             | SQLite         | `~/.local/share/opencode/`                |
+| [Pi](https://pi.dev)                                           | [piagent](pkg/providers/piagent/)               | JSONL          | `~/.pi/agent/sessions/`                   |
+| [Qwen Code](https://github.com/QwenLM/qwen-code)               | [qwencode](pkg/providers/qwencode/)             | JSONL          | `~/.qwen/projects/`                       |
+| [Grok Build](https://x.ai/cli)                                 | [grokbuild](pkg/providers/grokbuild/)           | JSONL          | `~/.grok/sessions/`                       |
 
 ### Notes on Cursor Cloud Agents
 
@@ -170,6 +178,11 @@ reconstructed into the target agent — that path requires a SpecStory Cloud log
 (`specstory login`) and a Pro plan. A pasted permalink only contributes IDs; the CLI never
 sends your token to the permalink's host — if it differs from your configured cloud, pass
 `--cloud-url` to match (see [Targeting a non-production cloud](#targeting-a-non-production-cloud)).
+
+Two things are worth knowing when you address one session directly:
+
+- **The index is not involved.** The session is looked up by ID in its own provider's store, so this works on a machine whose session index has never been built. The index is only opened for browsing and searching, and is used here only as a fallback before the cloud.
+- **A resumed session belongs to the directory you run the command from.** Run it from the project you want the session to appear in; resuming into Cursor IDE, for example, registers the new conversation under the project you are standing in.
 
 ### Skills
 
