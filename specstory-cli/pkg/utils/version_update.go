@@ -9,6 +9,25 @@ import (
 	"time"
 )
 
+// upstreamReleaseRepo is the canonical "owner/name" of the project.
+const upstreamReleaseRepo = "specstoryai/getspecstory"
+
+// releaseRepo is the "owner/name" whose GitHub releases this build reports updates
+// from. It defaults to upstream, so a plain `go build` behaves as it always has;
+// release builds override it with their own repository via -ldflags
+// (see .goreleaser.yml), which is what makes a fork's binaries point at the fork's
+// releases instead of sending users back to upstream.
+var releaseRepo = upstreamReleaseRepo
+
+// releasesRepo returns the repository whose releases this build tracks, falling back
+// to upstream if the build left the variable empty.
+func releasesRepo() string {
+	if releaseRepo == "" {
+		return upstreamReleaseRepo
+	}
+	return releaseRepo
+}
+
 // CheckForUpdates checks for newer versions of the CLI and displays a notification if available
 func CheckForUpdates(currentVersion string, noVersionCheck bool, silent bool) {
 	if noVersionCheck || currentVersion == "dev" {
@@ -31,7 +50,7 @@ func CheckForUpdates(currentVersion string, noVersionCheck bool, silent bool) {
 	}
 
 	// Make HEAD request to get redirect URL
-	resp, err := client.Head("https://github.com/specstoryai/getspecstory/releases/latest")
+	resp, err := client.Head("https://github.com/" + releasesRepo() + "/releases/latest")
 	if err != nil {
 		slog.Error("Version check failed", "error", err)
 		return
@@ -78,7 +97,7 @@ func CheckForUpdates(currentVersion string, noVersionCheck bool, silent bool) {
 			fmt.Printf("│ Current version: %-42s │\n", currentVersion)
 			fmt.Printf("│ Latest version:  %-42s │\n", latestVersion)
 			fmt.Println("├─────────────────────────────────────────────────────────────┤")
-			fmt.Println("│ Visit https://docs.specstory.com/quickstart for updates     │")
+			fmt.Printf("│ %-59s │\n", "https://github.com/"+releasesRepo()+"/releases")
 			fmt.Println("╰─────────────────────────────────────────────────────────────╯")
 			fmt.Println()
 		}

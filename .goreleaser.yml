@@ -22,6 +22,7 @@ builds:
       - -s -w
       - -X main.version={{.Version}}
       - -X github.com/specstoryai/getspecstory/specstory-cli/pkg/analytics.apiKey={{.Env.POSTHOG_API_KEY}}
+      - -X github.com/specstoryai/getspecstory/specstory-cli/pkg/utils.releaseRepo={{.Env.GITHUB_REPOSITORY}}
   - id: windows
     env:
       - CGO_ENABLED=0
@@ -37,6 +38,7 @@ builds:
       - -s -w
       - -X main.version={{.Version}}
       - -X github.com/specstoryai/getspecstory/specstory-cli/pkg/analytics.apiKey={{.Env.POSTHOG_API_KEY}}
+      - -X github.com/specstoryai/getspecstory/specstory-cli/pkg/utils.releaseRepo={{.Env.GITHUB_REPOSITORY}}
 
 archives:
   # tar.gz for Unix only — Homebrew and install.sh consume these.

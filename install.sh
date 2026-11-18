@@ -1,7 +1,9 @@
 #!/bin/bash
 set -e
 
-REPO="specstoryai/getspecstory"
+# Release source. Defaults to this fork so installs and updates stay on the fork's
+# own releases (which carry the Cursor resume fix); set SPECSTORY_REPO to override.
+REPO="${SPECSTORY_REPO:-yaogjim/getspecstory}"
 BINARY_NAME="specstory"
 INSTALL_DIR="/usr/local/bin"
 

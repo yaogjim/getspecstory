@@ -2,6 +2,10 @@
 
 ## v2.17.1 2026-11-17
 
+### ⚙️ Improvements
+
+- The update notice now reports releases from the GitHub repository the binary was released from, instead of always from the upstream project. Release builds record their own repository (`.goreleaser.yml` passes `GITHUB_REPOSITORY` into the binary), so a fork's binaries point at that fork's releases; a plain `go build` still points at upstream. `install.sh` likewise defaults to the fork's releases, overridable with `SPECSTORY_REPO`.
+
 ### 🐛 Bug Fixes
 
 - Sessions resumed into Cursor CLI now open with `specstory resume`. The reconstructed `store.db` did not match what `cursor-agent --resume` reads back: the session root referenced messages by blob id instead of carrying them inline, each message lacked the `<user_query>` wrapper Cursor puts around a prompt, and the session metadata omitted the `blobEncryptionKey` the CLI requires. Reconstructed sessions now use the shape the CLI writes itself, so the prior conversation loads.

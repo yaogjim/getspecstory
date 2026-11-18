@@ -73,6 +73,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Notify Slack (#clients)
+        # Upstream-only integration: forks have no webhook secret, and the step
+        # would otherwise fail the release after goreleaser has already published.
+        if: github.repository == 'specstoryai/getspecstory'
         env:
             SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_CLIENTS }}
             VERSION: ${{ steps.release_details.outputs.version || 'unknown version' }}
@@ -118,6 +121,9 @@ jobs:
 
   update-homebrew-tap:
     needs: [goreleaser]
+    # Upstream-only: the tap and its token belong to the upstream org, so a fork
+    # release must not attempt to rewrite someone else's formula.
+    if: github.repository == 'specstoryai/getspecstory'
     runs-on: ubuntu-latest
     environment: production
     steps:
