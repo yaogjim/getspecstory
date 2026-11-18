@@ -70,6 +70,20 @@ reconstruct — by design, because its whole purpose is to keep a session out of
 the native store still contains. Wiping `sessions.db` (deleting the file) clears the tombstones
 too, which is exactly the documented "undo".
 
+### What the index is *not* for
+
+Because it is a cache, the index is never the price of **addressing one session**. `sync -s
+<id>`, `resume <agent> --session <uuid>`, and any import/export of a session whose ID is already
+known read that session straight from its provider's native store, through the optional
+`spi.SessionLocator` capability (`FindSessionByID`) plus `spi.PathSessionReader` when the store
+does not record a project directory. The index is opened only for the paths that genuinely need
+it — browsing, searching and picking — and the direct path falls back to it, then to SpecStory
+Cloud, only when no local provider holds the session.
+
+That split sets the cost model: a direct path costs one session, and a rebuild of the whole
+index is a deliberate, background operation for the browsing UX rather than a hidden prerequisite
+of syncing or resuming.
+
 ## Soft delete (the `d` key)
 
 The resume/search TUI lets a user remove a session — or a whole project's sessions — from the

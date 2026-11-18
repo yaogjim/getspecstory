@@ -252,20 +252,35 @@ func (w *CursorWatcher) processSessionChanges(sessionID string, dbPath string) b
 		return false
 	}
 
-	if len(blobRecords) == 0 {
+	// Prefer Cursor's JSONL transcript, which carries every turn and its tool calls;
+	// store.db's DAG is the fallback. See resolveSessionMessages.
+	records, source, err := resolveSessionMessages(sessionPath, blobRecords)
+	if err != nil {
+		slog.Error("Failed to read session conversation", "sessionId", sessionID, "error", err)
+		return false
+	}
+	if slug == "" {
+		slug = extractSlugFromBlobs(records)
+	}
+
+	if len(records) == 0 {
 		slog.Debug("Session has no message records", "sessionId", sessionID)
 		return false
 	}
+	slog.Debug("Resolved Cursor session conversation",
+		"sessionId", sessionID,
+		"source", source,
+		"messages", len(records))
 
 	// Generate SessionData from blob records
-	sessionData, err := GenerateAgentSession(blobRecords, w.projectPath, sessionID, createdAt, slug, w.tsCache)
+	sessionData, err := GenerateAgentSession(records, w.projectPath, sessionID, createdAt, slug, w.tsCache)
 	if err != nil {
 		slog.Error("Failed to generate SessionData", "sessionId", sessionID, "error", err)
 		return false
 	}
 
 	// Marshal blob records to JSON for raw data
-	rawDataJSON, err := json.Marshal(blobRecords)
+	rawDataJSON, err := json.Marshal(records)
 	if err != nil {
 		slog.Error("Failed to marshal blob records", "sessionId", sessionID, "error", err)
 		return false

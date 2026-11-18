@@ -272,6 +272,72 @@ func (p *Provider) GetAgentChatSession(projectPath string, sessionID string, deb
 	return p.readAgentChatSession(hashDir, projectPath, sessionID, debugRaw)
 }
 
+// FindSessionByID locates one session from its ID alone, for a caller that knows the ID but not
+// the project it was launched from. See spi.SessionLocator.
+//
+// Cursor files sessions under ~/.cursor/chats/<md5(cwd)>/<sessionID>/, and md5 cannot be
+// inverted, so the session is found by checking each hash directory for this one ID: a
+// directory entry per project, with no other session opened and nothing indexed. Cursor records
+// no cwd in its store, so OriginCwd is left empty and the caller reads the session through
+// GetAgentChatSessionByPath rather than by (cwd, id).
+func (p *Provider) FindSessionByID(sessionID string) (*spi.GlobalSessionRef, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+
+	chatsDir, err := GetCursorChatsDir()
+	if err != nil {
+		return nil, err
+	}
+	hashEntries, err := os.ReadDir(chatsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read cursor chats directory: %w", err)
+	}
+
+	for _, hashEntry := range hashEntries {
+		if !hashEntry.IsDir() {
+			continue
+		}
+		hashDir := filepath.Join(chatsDir, hashEntry.Name())
+		if !HasStoreDB(hashDir, sessionID) {
+			continue
+		}
+
+		sessionPath := filepath.Join(hashDir, sessionID)
+		ref := &spi.GlobalSessionRef{
+			SessionID:  sessionID,
+			NativePath: filepath.Join(sessionPath, "store.db"),
+		}
+		// The name is for display only, so a session whose metadata cannot be read is still
+		// resumable — it just loses its label.
+		if metadata, merr := extractCursorSessionMetadata(sessionPath, sessionID); merr != nil {
+			slog.Warn("FindSessionByID: failed to extract session metadata", "sessionID", sessionID, "error", merr)
+		} else if metadata != nil {
+			ref.CreatedAt = metadata.CreatedAt
+			ref.Slug = metadata.Slug
+			ref.Name = metadata.Name
+		}
+		return ref, nil
+	}
+
+	return nil, nil
+}
+
+// GetAgentChatSessionByPath reads one session from its store.db path. It exists for sessions
+// located by ID alone: Cursor keys them by md5(cwd), which cannot be inverted, so there is a
+// path but no project directory to pass as projectPath. originCwd may be empty; the project
+// path only supplies SessionData's workspace root, which a resume overwrites with its target.
+func (p *Provider) GetAgentChatSessionByPath(nativePath string, originCwd string, debugRaw bool) (*spi.AgentChatSession, error) {
+	sessionPath := nativePath
+	if filepath.Base(nativePath) == "store.db" {
+		sessionPath = filepath.Dir(nativePath)
+	}
+	return p.readAgentChatSession(filepath.Dir(sessionPath), originCwd, filepath.Base(sessionPath), debugRaw)
+}
+
 // readAgentChatSession reads a single session from a known hash directory. It is the
 // shared implementation used by both GetAgentChatSession and GetAgentChatSessions so
 // that the potentially-expensive workspace scan in GetProjectHashDir is only done once
@@ -294,18 +360,36 @@ func (p *Provider) readAgentChatSession(hashDir, projectPath, sessionID string, 
 		return nil, fmt.Errorf("failed to read session data: %w", err)
 	}
 
-	// Generate SessionData from blob records
-	sessionData, err := GenerateAgentSession(blobRecords, projectPath, sessionID, createdAt, slug, nil)
+	// The conversation comes from Cursor's JSONL transcript when it has one, with the
+	// store.db blobs as the fallback; see resolveSessionMessages.
+	records, source, err := resolveSessionMessages(sessionPath, blobRecords)
+	if err != nil {
+		return nil, err
+	}
+	if slug == "" {
+		// The DAG carries no message to derive a name from (it is metadata-only for a
+		// transcript-backed session), so name the session after its first real prompt.
+		slug = extractSlugFromBlobs(records)
+	}
+
+	// Generate SessionData from the resolved records
+	sessionData, err := GenerateAgentSession(records, projectPath, sessionID, createdAt, slug, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate SessionData: %w", err)
 	}
 
 	// Marshal blob records to JSON for raw data
-	rawDataJSON, err := json.Marshal(blobRecords)
+	rawDataJSON, err := json.Marshal(records)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal blob records: %w", err)
 	}
 	rawData := string(rawDataJSON)
+
+	slog.Debug("Resolved Cursor CLI session conversation",
+		"sessionID", sessionID,
+		"source", source,
+		"messages", len(records),
+		"exchanges", len(sessionData.Exchanges))
 
 	if debugRaw {
 		if err := writeDebugOutput(sessionID, rawData, orphanRecords); err != nil {
@@ -545,8 +629,16 @@ func extractCursorSessionMetadata(sessionPath string, sessionID string) (*spi.Se
 		return nil, fmt.Errorf("failed to read session data: %w", err)
 	}
 
+	// Name the session from the same records the conversation is built from. Reading only
+	// the DAG would leave out every session whose turns live in Cursor's transcript, which
+	// is where the conversation itself is.
+	records, _, err := resolveSessionMessages(sessionPath, blobRecords)
+	if err != nil {
+		return nil, err
+	}
+
 	// Extract first user message for both slug and name
-	firstUserMessage := extractFirstUserMessage(blobRecords)
+	firstUserMessage := extractFirstUserMessage(records)
 	if firstUserMessage == "" {
 		// No user message found, session is empty
 		return nil, nil
@@ -618,6 +710,10 @@ func (p *Provider) ListAllAgentChatSessions() ([]spi.GlobalSessionRef, error) {
 				Name:       metadata.Name,
 				NativePath: filepath.Join(sessionPath, "store.db"),
 				OriginCwd:  "", // not stored by Cursor; recovered at reindex via the hash in NativePath
+				// Covers the transcript as well as store.db: the conversation lives in the
+				// transcript now, so statting store.db alone would call a growing session
+				// unchanged and skip it.
+				Fingerprint: sessionFingerprint(sessionPath),
 			})
 		}
 	}

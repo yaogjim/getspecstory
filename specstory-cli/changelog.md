@@ -1,5 +1,18 @@
 # Specstory CLI Changelog
 
+## v2.17.2 2026-11-17
+
+### ⚙️ Improvements
+
+- `specstory resume <agent> --session <uuid>` now finds the session in its own provider's store instead of going through the sessions index, so resuming, importing or exporting one known session no longer depends on an index of every session on the machine. The index is a derived cache for browsing, searching and picking; the direct path reads one session, and only falls back to the index — then SpecStory Cloud, for a session on another machine — when no provider holds it. Cursor CLI and Cursor IDE gained a by-id lookup for this, and Cursor CLI sessions can now be read straight from their `store.db` path, since Cursor keys them by a one-way hash of the project directory.
+
+### 🐛 Bug Fixes
+
+- Cursor CLI sessions now keep their whole conversation when saved. SpecStory rebuilt a session from the blob DAG in `store.db`, which holds Cursor's model-facing replay state rather than the conversation: its messages carry a plain-text `content` that is empty on tool-only turns, and tool calls are not represented there at all. Sessions whose conversation lived only in that shape read as empty — `specstory sync` wrote a heading with no turns under it, and `specstory resume` had nothing to resume. Cursor already writes the conversation itself, as a JSONL transcript at `~/.cursor/projects/<slug>/agent-transcripts/<session-id>/<session-id>.jsonl`; it is now the message source, with the inline root blob and then the DAG kept as fallbacks. Tool calls are read with their name and input, so they appear in the saved markdown and can be resumed. Tool results are still absent, because Cursor does not write them to the transcript.
+- A Cursor CLI session with no readable conversation now fails with an error instead of being saved as an empty document, which looked like a session with nothing in it.
+- `specstory reindex` now notices a Cursor CLI session that grew. The freshness token covered `store.db` only, but the conversation is written to the transcript, so a session whose turns arrived in the transcript looked unchanged and was skipped, leaving the index stale.
+- `specstory reindex` no longer re-reads every Cursor IDE session on every run. Their freshness token was the size and modification time of the one `state.vscdb` they all share, so any write anywhere in Cursor marked all of them as changed and each was parsed again. The token now comes from the session itself — how many bubbles it has and when the newest was written — which advances when a turn is added and stays put otherwise. The first reindex after upgrading re-reads each session once, because the tokens it has stored are in the old form.
+
 ## v2.17.1 2026-11-17
 
 ### ⚙️ Improvements

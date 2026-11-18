@@ -246,6 +246,23 @@ type PathSessionReader interface {
 	GetAgentChatSessionByPath(nativePath string, originCwd string, debugRaw bool) (*AgentChatSession, error)
 }
 
+// SessionLocator is an OPTIONAL capability a Provider may implement: find ONE session from its
+// native ID alone, with no project path and without reading the sessions.db index.
+//
+// Why: the direct paths — `sync -s <id>`, `resume <agent> --session <uuid>`, importing or
+// exporting a session whose ID is already known — address a single session. Every required
+// by-id lookup on the Provider interface takes a project path, so a caller holding only an ID
+// had to enumerate and index every session on the machine first. The index exists to browse,
+// search and pick; it is a derived cache and must never be the price of addressing one session.
+//
+// Implementations resolve by a targeted lookup (a directory entry, one key in a store), never
+// by a scan that parses bodies, and return (nil, nil) when this provider does not hold the
+// session. The ref may leave OriginCwd empty when the native store does not record it; callers
+// then read the session through PathSessionReader using the ref's NativePath.
+type SessionLocator interface {
+	FindSessionByID(sessionID string) (*GlobalSessionRef, error)
+}
+
 // ProgressEnumerator is an OPTIONAL Provider capability: enumerate all sessions while reporting
 // scan progress into r (which may be nil — ScanReporter is nil-safe, so report unconditionally).
 // Providers that don't implement it are enumerated via ListAllAgentChatSessions with no live

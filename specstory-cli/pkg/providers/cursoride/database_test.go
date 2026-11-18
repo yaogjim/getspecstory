@@ -964,3 +964,121 @@ func TestMergeHeaderPages(t *testing.T) {
 		})
 	}
 }
+
+// FindSessionByID reads the one composer instead of every composer's metadata, and resolves the
+// project from the workspace the composer embeds.
+func TestFindSessionByID_ReadsOneComposerAndItsProject(t *testing.T) {
+	composer, err := json.Marshal(ComposerData{
+		ComposerID: "c1",
+		Name:       "Fix the login bug",
+		CreatedAt:  1700000000000,
+		Conversation: []ComposerConversation{
+			{BubbleID: "b1", Type: 1, Text: "why does login fail"},
+		},
+		WorkspaceIdentifier: &ComposerWorkspaceIdentifier{
+			ID:  "ws-1",
+			URI: &ComposerWorkspaceURI{FsPath: "/tmp/proj"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := createTestGlobalDB(t, map[string]string{"composerData:c1": string(composer)})
+
+	original := GetGlobalDatabasePath
+	GetGlobalDatabasePath = func() (string, error) { return dbPath, nil }
+	t.Cleanup(func() { GetGlobalDatabasePath = original })
+
+	provider := &Provider{}
+	ref, err := provider.FindSessionByID("c1")
+	if err != nil {
+		t.Fatalf("FindSessionByID: %v", err)
+	}
+	if ref == nil {
+		t.Fatal("composer not found")
+	}
+	if ref.OriginCwd != "/tmp/proj" {
+		t.Errorf("OriginCwd = %q, want the embedded workspace path", ref.OriginCwd)
+	}
+	if ref.Name == "" {
+		t.Error("name not read from the composer")
+	}
+	if ref.NativePath != dbPath {
+		t.Errorf("NativePath = %q, want the global database", ref.NativePath)
+	}
+}
+
+func TestFindSessionByID_UnknownComposerIsAMiss(t *testing.T) {
+	dbPath := createTestGlobalDB(t, map[string]string{})
+	original := GetGlobalDatabasePath
+	GetGlobalDatabasePath = func() (string, error) { return dbPath, nil }
+	t.Cleanup(func() { GetGlobalDatabasePath = original })
+
+	provider := &Provider{}
+	ref, err := provider.FindSessionByID("nope")
+	if err != nil {
+		t.Fatalf("FindSessionByID: %v", err)
+	}
+	if ref != nil {
+		t.Fatalf("found %+v, want a miss", ref)
+	}
+}
+
+// The freshness token must move when a turn is appended, since that is the only thing reindex
+// uses to decide whether a session needs re-parsing. Measured on a live session: appending one
+// turn took the header list from 3 to 6 and advanced the newest createdAt.
+func TestComposerFingerprint_ChangesWhenATurnIsAppended(t *testing.T) {
+	composer := &ComposerData{
+		ComposerID: "c1",
+		FullConversationHeadersOnly: []ComposerConversationHeader{
+			{BubbleID: "b1", CreatedAt: "2026-11-18T05:21:27.569Z"},
+			{BubbleID: "b2", CreatedAt: "2026-11-18T05:21:35.029Z"},
+			{BubbleID: "b3", CreatedAt: "2026-11-18T05:21:35.702Z"},
+		},
+	}
+	before := composerFingerprint(composer)
+	if before == nil {
+		t.Fatal("no fingerprint for a composer with bubbles")
+	}
+	if before.Size != 3 {
+		t.Errorf("Size = %d, want the bubble count 3", before.Size)
+	}
+	if want := int64(1794979295702); before.Mtime != want {
+		t.Errorf("Mtime = %d, want the newest header %d", before.Mtime, want)
+	}
+
+	composer.FullConversationHeadersOnly = append(composer.FullConversationHeadersOnly,
+		ComposerConversationHeader{BubbleID: "b4", CreatedAt: "2026-11-18T05:23:20.265Z"},
+		ComposerConversationHeader{BubbleID: "b5", CreatedAt: "2026-11-18T05:23:30.265Z"},
+	)
+	after := composerFingerprint(composer)
+	if after.Size == before.Size || after.Mtime == before.Mtime {
+		t.Fatalf("fingerprint did not move after a turn: before=%+v after=%+v", before, after)
+	}
+}
+
+// Older composers keep their conversation inline rather than in header pages, so the token has
+// to read the bubble timings too.
+func TestComposerFingerprint_UsesInlineConversationTiming(t *testing.T) {
+	composer := &ComposerData{
+		ComposerID: "c1",
+		Conversation: []ComposerConversation{
+			{BubbleID: "b1", Type: 1, Text: "hi", TimingInfo: &TimingInfo{ClientStartTime: 1794979273569}},
+		},
+	}
+	got := composerFingerprint(composer)
+	if got == nil {
+		t.Fatal("no fingerprint for an inline conversation")
+	}
+	if got.Size != 1 || got.Mtime != 1794979273569 {
+		t.Errorf("fingerprint = %+v, want one bubble at 1794979273569", got)
+	}
+}
+
+// A composer with nothing to measure reports unknown rather than "unchanged", so reindex falls
+// back to the file stat instead of skipping it forever.
+func TestComposerFingerprint_EmptyComposerIsUnknown(t *testing.T) {
+	if got := composerFingerprint(&ComposerData{ComposerID: "c1"}); got != nil {
+		t.Fatalf("fingerprint = %+v, want nil", got)
+	}
+}

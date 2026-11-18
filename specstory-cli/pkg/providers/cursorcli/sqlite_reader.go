@@ -2,6 +2,7 @@ package cursorcli
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -172,6 +173,123 @@ func getSessionTimestamp(db *sql.DB) (string, error) {
 
 	// Return current time as fallback
 	return time.Now().Format(time.RFC3339), nil
+}
+
+// readRootMessages returns the messages a session's root blob carries inline, or nil
+// when the root is not inline. Cursor's root (meta['0'].latestRootBlobId) holds either a
+// field-1 JSON message per entry — the conversation itself, which the blob-reference
+// traversal cannot reach, since an inline root references nothing — or, for older
+// sessions, 32-byte references to message blobs, which the traversal already handles.
+func readRootMessages(sessionPath string) []BlobRecord {
+	dbPath := filepath.Join(sessionPath, "store.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&"+spi.BusyTimeoutPragma)
+	if err != nil {
+		slog.Debug("Failed to open database for root messages", "path", dbPath, "error", err)
+		return nil
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			slog.Debug("Failed to close database", "error", err)
+		}
+	}()
+
+	var rawValue string
+	if err := db.QueryRow("SELECT value FROM meta WHERE key='0'").Scan(&rawValue); err != nil {
+		slog.Debug("Failed to read root metadata", "error", err)
+		return nil
+	}
+	jsonBytes, err := hex.DecodeString(rawValue)
+	if err != nil {
+		slog.Debug("Failed to decode root metadata", "error", err)
+		return nil
+	}
+	var metadata struct {
+		LatestRootBlobID string `json:"latestRootBlobId"`
+	}
+	if err := json.Unmarshal(jsonBytes, &metadata); err != nil || metadata.LatestRootBlobID == "" {
+		slog.Debug("No latestRootBlobId in root metadata", "error", err)
+		return nil
+	}
+
+	var root []byte
+	if err := db.QueryRow("SELECT data FROM blobs WHERE id=?", metadata.LatestRootBlobID).Scan(&root); err != nil {
+		slog.Debug("Failed to read root blob", "blobID", metadata.LatestRootBlobID, "error", err)
+		return nil
+	}
+
+	var records []BlobRecord
+	for _, entry := range pbMessageEntries(root) {
+		var message struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(entry, &message); err != nil {
+			// A reference-style root: its entries are blob IDs, not messages, and the
+			// DAG traversal reads that session instead.
+			return nil
+		}
+		if message.Role == "" {
+			return nil
+		}
+		if message.Role != "user" && message.Role != "assistant" && message.Role != "tool" {
+			continue
+		}
+		parts := normalizeTranscriptParts(message.Content)
+		if len(parts) == 0 {
+			continue
+		}
+		encoded, err := json.Marshal(map[string]interface{}{
+			"role":    message.Role,
+			"content": parts,
+		})
+		if err != nil {
+			continue
+		}
+		records = append(records, BlobRecord{
+			RowID: len(records) + 1,
+			ID:    fmt.Sprintf("root-%d", len(records)+1),
+			Data:  encoded,
+		})
+	}
+	return records
+}
+
+// pbMessageEntries returns the payloads of a protobuf message's length-delimited field 1
+// entries, in order. A malformed message yields what was read up to that point.
+func pbMessageEntries(data []byte) [][]byte {
+	var entries [][]byte
+	for i := 0; i < len(data); {
+		key, n := binary.Uvarint(data[i:])
+		if n <= 0 {
+			return entries
+		}
+		i += n
+		switch key & 7 {
+		case 2:
+			length, n := binary.Uvarint(data[i:])
+			if n <= 0 || length > uint64(len(data)-i-n) {
+				return entries
+			}
+			i += n
+			if key>>3 == 1 {
+				entries = append(entries, data[i:i+int(length)])
+			}
+			i += int(length)
+		case 0:
+			_, n := binary.Uvarint(data[i:])
+			if n <= 0 {
+				return entries
+			}
+			i += n
+		case 1:
+			i += 8
+		case 5:
+			i += 4
+		default:
+			return entries
+		}
+	}
+	return entries
 }
 
 // ReadSessionData reads all blobs from a Cursor session's store.db file

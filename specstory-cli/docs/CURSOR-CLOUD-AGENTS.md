@@ -20,7 +20,7 @@ Cursor Cloud Agents (formerly Background Agents) run the agent loop, inference a
 
 Sources: `cursor.com/docs/cloud-agent`, `/docs/cloud-agent/security`, `/docs/cloud-agent/self-hosted`, forum thread 165486 (Cursor staff: cloud sync "does not cover this local back and forth"), strings in `/Applications/Cursor.app` `workbench.desktop.main.js` (3.13.25), and the spike in section 6.
 
-Cursor also writes `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl` for local IDE and CLI agents. This is a flattened text-only transcript (no tool results). The cloud VM exports `AGENT_TRANSCRIPTS=/home/ubuntu/.cursor/projects/workspace/agent-transcripts`, but that directory is never created.
+Cursor also writes `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl` for local IDE and CLI agents. This is a flattened transcript (no tool results; tool calls are present as `tool_use` parts). It is the message source the Cursor CLI provider reads sessions from, with the `store.db` blob DAG only as a fallback — the DAG holds model-facing replay state, not the conversation. The cloud VM exports `AGENT_TRANSCRIPTS=/home/ubuntu/.cursor/projects/workspace/agent-transcripts`, but that directory is never created.
 
 An account on "Privacy Mode (Legacy)" cannot use cloud agents at all. Every v0 and v1 agents call returns `400 validation_error: "Cloud agent is not supported in Privacy Mode (Legacy)"`. Customers reporting missing cloud agent histories are therefore on standard Privacy Mode, whose conversations are stored server-side.
 

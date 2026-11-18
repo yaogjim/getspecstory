@@ -137,6 +137,22 @@ Resuming SpecStory Cloud sessions (from your other machines) requires an active 
 				return err
 			}
 
+			// Direct addressing of one known session must not read the index: sessions.db is a
+			// cache for browsing and searching, and building it enumerates every session on the
+			// machine. `resume <agent> --session <uri>` therefore resolves the session in its
+			// provider's own store first and only falls through to the index — then the cloud,
+			// for a session that lives on another machine — when no provider holds it.
+			sessionArg, _ := cmd.Flags().GetString("session")
+			if sessionArg != "" && presetTarget != "" {
+				plan, found, directErr := directResumePlan(registry, sessionArg, presetTarget)
+				if directErr != nil {
+					return directErr
+				}
+				if found {
+					return launchResume(plan, cwd, launchOpts)
+				}
+			}
+
 			// Open (building if needed) the session index and run the interactive picker.
 			// builtFresh = the index was just rebuilt in the foreground, so the picker skips
 			// the background index warm (it would be redundant).
@@ -156,7 +172,6 @@ Resuming SpecStory Cloud sessions (from your other machines) requires an active 
 			// non-interactive (no TUI); without one the resolved session is pinned and the shared
 			// picker tail below opens the TUI at the target-selection step.
 			var pinned *sessionindex.Session
-			sessionArg, _ := cmd.Flags().GetString("session")
 			if sessionArg != "" {
 				resolved, rerr := resolveSessionURI(sessionArg, store, agentIDByNameFromRegistry(registry))
 				if rerr != nil {

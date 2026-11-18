@@ -7,10 +7,13 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/specstoryai/getspecstory/specstory-cli/pkg/cloud"
 	"github.com/specstoryai/getspecstory/specstory-cli/pkg/sessionindex"
+	"github.com/specstoryai/getspecstory/specstory-cli/pkg/spi"
+	"github.com/specstoryai/getspecstory/specstory-cli/pkg/spi/factory"
 	"github.com/specstoryai/getspecstory/specstory-cli/pkg/utils"
 )
 
@@ -304,4 +307,78 @@ func mapCloudResumeErr(err error) error {
 		return utils.ValidationError{Message: "Resuming cloud sessions requires SpecStory Pro."}
 	}
 	return err
+}
+
+// directResumePlan builds a resume plan for a session addressed by ID, without opening the
+// sessions.db index. found=false means no provider holds the session locally, so the caller
+// falls back to the index and then the cloud (a session from another machine lives only there).
+//
+// The index is a derived cache for browsing and searching; addressing one known session must
+// not require enumerating every session on the machine, which is what building the index does.
+func directResumePlan(registry *factory.Registry, raw string, targetID string) (plan *resumePlan, found bool, err error) {
+	uri, parseErr := parseSessionURI(raw)
+	if parseErr != nil {
+		// Not this path's error to word: the indexed path parses the same argument and reports
+		// it with the usage help the user needs.
+		return nil, false, nil
+	}
+
+	ref, agentID := locateSessionByID(registry.GetAll(), uri.sessionID)
+	if ref == nil {
+		return nil, false, nil
+	}
+
+	session := &sessionindex.Session{
+		Agent:      agentID,
+		SessionID:  ref.SessionID,
+		Name:       ref.Name,
+		Slug:       ref.Slug,
+		CreatedAt:  ref.CreatedAt,
+		OriginCwd:  ref.OriginCwd,
+		NativePath: ref.NativePath,
+	}
+	// The project id is only needed for cloud calls and display; a provider that records no cwd
+	// (Cursor CLI keys sessions by a one-way hash) leaves it empty.
+	if ref.OriginCwd != "" {
+		if projectID, projectName, idErr := utils.ComputeProjectID(ref.OriginCwd); idErr == nil {
+			session.ProjectID, session.ProjectName = projectID, projectName
+		}
+	}
+
+	slog.Debug("direct resume: session located without the index",
+		"agent", agentID, "session", shortID(session.SessionID), "originCwd", ref.OriginCwd)
+
+	plan, err = resumePlanFromSession(registry, nil, session, targetID)
+	if err != nil {
+		return nil, false, err
+	}
+	return plan, true, nil
+}
+
+// locateSessionByID asks every provider that can resolve a session by ID alone, in a stable
+// provider order. Session IDs are unique per store and the stores do not overlap, so the first
+// hit is the session; a provider that cannot read its own store is skipped rather than failing
+// the whole lookup.
+func locateSessionByID(providers map[string]spi.Provider, sessionID string) (*spi.GlobalSessionRef, string) {
+	ids := make([]string, 0, len(providers))
+	for id := range providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	for _, id := range ids {
+		locator, ok := providers[id].(spi.SessionLocator)
+		if !ok {
+			continue
+		}
+		ref, err := locator.FindSessionByID(sessionID)
+		if err != nil {
+			slog.Debug("locateSessionByID: provider lookup failed", "agent", id, "session", shortID(sessionID), "error", err)
+			continue
+		}
+		if ref != nil {
+			return ref, id
+		}
+	}
+	return nil, ""
 }

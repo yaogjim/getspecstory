@@ -73,6 +73,13 @@ func GenerateAgentSession(blobRecords []BlobRecord, workspaceRoot, sessionID, cr
 
 	slog.Info("GenerateAgentSession: Built exchanges", "count", len(exchanges))
 
+	// Records that yield no exchange mean the conversation is not in a shape this reader
+	// understands. Failing keeps an unreadable session from being saved as an empty
+	// document that looks like a conversation with nothing in it.
+	if len(exchanges) == 0 {
+		return nil, fmt.Errorf("read %d record(s) but found no conversation messages", len(blobRecords))
+	}
+
 	// Populate Summary and FormattedMarkdown for all tools using existing Cursor formatters
 	for i := range exchanges {
 		for j := range exchanges[i].Messages {

@@ -358,6 +358,71 @@ func (p *Provider) GetAgentChatSession(projectPath string, sessionID string, deb
 	return session, nil
 }
 
+// FindSessionByID locates one composer from its ID alone, for a caller that knows the ID but
+// not the project it belongs to. See spi.SessionLocator.
+//
+// Where ListAllAgentChatSessions loads every composer's metadata, this reads the one
+// composerData row and resolves its project, so `resume --session <uuid>` can address a Cursor
+// IDE session without building or reading the sessions index first.
+func (p *Provider) FindSessionByID(sessionID string) (*spi.GlobalSessionRef, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+
+	globalDbPath, err := GetGlobalDatabasePath()
+	if err != nil {
+		// No Cursor IDE on this machine means it cannot hold the session; that is a miss, not
+		// an error for every other provider's lookup.
+		slog.Debug("FindSessionByID: Cursor IDE global database not found", "error", err)
+		return nil, nil
+	}
+	composers, err := LoadComposerDataBatch(globalDbPath, []string{sessionID})
+	if err != nil {
+		return nil, fmt.Errorf("failed to load composer data: %w", err)
+	}
+	composer, exists := composers[sessionID]
+	if !exists || composer == nil {
+		return nil, nil
+	}
+	if len(composer.Conversation) == 0 && len(composer.FullConversationHeadersOnly) == 0 {
+		return nil, nil // never had a conversation, nothing to resume
+	}
+
+	// The embedded workspace URI is the cheapest project association; only composers that
+	// predate it need the workspace scan.
+	projectPath := ""
+	if wi := composer.WorkspaceIdentifier; wi != nil && wi.URI != nil {
+		projectPath = wi.URI.FsPath
+	}
+	if projectPath == "" {
+		workspaceIndex, werr := scanAllWorkspacePaths()
+		if werr != nil {
+			return nil, fmt.Errorf("failed to scan workspaces: %w", werr)
+		}
+		projectPath = resolveComposerProjectPath(sessionID, composer, workspaceIndex)
+	}
+
+	// Local time, matching ListAllAgentChatSessions, so one session has one CreatedAt.
+	var createdAt string
+	if composer.CreatedAt > 0 {
+		t := time.Unix(composer.CreatedAt/1000, (composer.CreatedAt%1000)*1000000)
+		createdAt = t.Format(time.RFC3339)
+	}
+	metadata := extractCursorIDESessionMetadata(composer)
+
+	slog.Debug("FindSessionByID: located Cursor IDE session",
+		"sessionID", sessionID, "projectPath", projectPath)
+
+	return &spi.GlobalSessionRef{
+		SessionID:  sessionID,
+		CreatedAt:  createdAt,
+		Slug:       metadata.Slug,
+		Name:       metadata.Name,
+		NativePath: globalDbPath,
+		OriginCwd:  projectPath,
+	}, nil
+}
+
 // ListAgentChatSessions retrieves lightweight metadata for all sessions
 func (p *Provider) ListAgentChatSessions(projectPath string) ([]spi.SessionMetadata, error) {
 	slog.Debug("ListAgentChatSessions: Loading Cursor IDE session list",
@@ -463,11 +528,68 @@ func (p *Provider) ListAllAgentChatSessions() ([]spi.GlobalSessionRef, error) {
 			Name:       generateCursorIDESessionName(composer),
 			NativePath: globalDbPath,
 			OriginCwd:  projectPath,
+			// Every composer shares this one SQLite file, so a file stat would call all of
+			// them changed whenever any session is written. Measured from the composer itself
+			// instead.
+			Fingerprint: composerFingerprint(composer),
 		})
 	}
 
 	slog.Info("Listed all Cursor IDE sessions", "count", len(refs))
 	return refs, nil
+}
+
+// composerFingerprint builds the reindex freshness token for one composer from metadata the
+// enumeration already holds: how many bubbles it has, and when the newest one was written.
+//
+// Why not the timestamps in composerHeaders: measured on a live session, appending one turn
+// moved the header list 3 → 6 and the newest header createdAt to the exact time of the last
+// bubble, while lastUpdatedAt and recency advanced but lagged that bubble by ~6.7s and are
+// absent for most composers, and checkpointAt follows checkpoints rather than messages.
+//
+// Why not a file stat: every composer lives in the same 10 GB state.vscdb, so its size and
+// mtime move on any write and every session would look changed on every reindex.
+//
+// A message edited in place, with no bubble added and no new timestamp, is the one change this
+// token misses; the session is re-read as soon as another turn arrives. Nil is returned when
+// there is nothing to measure, so reindex falls back to the file stat rather than treating the
+// session as unchanged.
+func composerFingerprint(composer *ComposerData) *spi.SessionFingerprint {
+	if composer == nil {
+		return nil
+	}
+
+	count := len(composer.Conversation) + len(composer.FullConversationHeadersOnly)
+	if count == 0 {
+		return nil
+	}
+
+	var newest int64
+	for _, header := range composer.FullConversationHeadersOnly {
+		if stamp, ok := parseComposerTimestamp(header.CreatedAt); ok && stamp > newest {
+			newest = stamp
+		}
+	}
+	// Older composers keep the conversation inline instead of in header pages.
+	for _, bubble := range composer.Conversation {
+		if bubble.TimingInfo != nil && int64(bubble.TimingInfo.ClientStartTime) > newest {
+			newest = int64(bubble.TimingInfo.ClientStartTime)
+		}
+	}
+
+	return &spi.SessionFingerprint{Size: int64(count), Mtime: newest}
+}
+
+// parseComposerTimestamp reads a bubble header's RFC3339 createdAt as epoch milliseconds.
+func parseComposerTimestamp(createdAt string) (int64, bool) {
+	if createdAt == "" {
+		return 0, false
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return 0, false
+	}
+	return parsed.UnixMilli(), true
 }
 
 // ExecAgentAndWatch opens Cursor IDE at the project path and then watches the Cursor

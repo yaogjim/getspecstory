@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"errors"
 	"testing"
+
+	"github.com/specstoryai/getspecstory/specstory-cli/pkg/spi"
 )
 
 // TestParseSessionURI exercises the three accepted --session forms: the canonical
@@ -137,6 +140,78 @@ func TestParseSessionURI(t *testing.T) {
 			}
 			if got.host != tt.wantHost {
 				t.Errorf("host = %q, want %q", got.host, tt.wantHost)
+			}
+		})
+	}
+}
+
+// locatingProvider answers the optional spi.SessionLocator capability, so the by-id lookup can
+// be exercised without a native store behind it.
+type locatingProvider struct {
+	fakeProvider
+	ref *spi.GlobalSessionRef
+	err error
+}
+
+func (l *locatingProvider) FindSessionByID(sessionID string) (*spi.GlobalSessionRef, error) {
+	if l.err != nil {
+		return nil, l.err
+	}
+	if l.ref == nil || l.ref.SessionID != sessionID {
+		return nil, nil
+	}
+	return l.ref, nil
+}
+
+// The direct lookup must reach the provider that holds the session, skip providers with no
+// by-id capability or an unreadable store, and report a clean miss otherwise — all without
+// consulting the index.
+func TestLocateSessionByID(t *testing.T) {
+	const sessionID = "550e8400-e29b-41d4-a716-446655440000"
+	ref := &spi.GlobalSessionRef{SessionID: sessionID, NativePath: "/tmp/session/store.db"}
+
+	tests := []struct {
+		name      string
+		providers map[string]spi.Provider
+		wantAgent string
+	}{
+		{
+			name: "found in the provider that holds it",
+			providers: map[string]spi.Provider{
+				"alpha": &fakeProvider{name: "Alpha"}, // no SessionLocator: skipped
+				"beta":  &locatingProvider{ref: ref},
+			},
+			wantAgent: "beta",
+		},
+		{
+			name: "a provider that cannot read its store does not stop the lookup",
+			providers: map[string]spi.Provider{
+				"alpha": &locatingProvider{err: errors.New("store unreadable")},
+				"beta":  &locatingProvider{ref: ref},
+			},
+			wantAgent: "beta",
+		},
+		{
+			name: "a miss when no provider holds the session",
+			providers: map[string]spi.Provider{
+				"alpha": &locatingProvider{},
+				"beta":  &fakeProvider{name: "Beta"},
+			},
+			wantAgent: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, agentID := locateSessionByID(tt.providers, sessionID)
+			if agentID != tt.wantAgent {
+				t.Fatalf("agent = %q, want %q", agentID, tt.wantAgent)
+			}
+			if tt.wantAgent == "" && got != nil {
+				t.Fatalf("ref = %+v, want nil", got)
+			}
+			if tt.wantAgent != "" && got != ref {
+				t.Fatalf("ref = %+v, want the provider's ref", got)
 			}
 		})
 	}
